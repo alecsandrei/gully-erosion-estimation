@@ -23,3 +23,5 @@ provider.loadAlgorithms()
 QgsApplication.processingRegistry().addProvider(provider=provider)
 
 import processing
+
+EPS = 1e-10

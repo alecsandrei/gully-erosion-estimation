@@ -12,6 +12,7 @@ import shapely.geometry
 
 
 class Converter:
+    """Used to convert between Shapely and PyQGIS geometry."""
 
     geoms: list[QgsAbstractGeometry] = []
 
@@ -34,7 +35,6 @@ class Converter:
             geometry_name = types.__iter__().__next__()
         else:
             geometry_name = 'GeometryCollection'
-        print(f'{geometry_name}?crs=epsg:{epsg}')
         layer = QgsVectorLayer(
             f'{geometry_name}?crs=epsg:{epsg}', 'converted', 'memory'
         )
