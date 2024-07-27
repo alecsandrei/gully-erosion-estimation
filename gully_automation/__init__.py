@@ -1,5 +1,10 @@
 import sys
 from qgis.core import *
+import osgeo.ogr
+
+
+osgeo.ogr.UseExceptions()
+
 
 # Initialize QGIS Application
 # Supply path to qgis install location
@@ -22,6 +27,12 @@ provider.loadAlgorithms()
 # adding the Saga NextGen processing Provider to the registry.
 QgsApplication.processingRegistry().addProvider(provider=provider)
 
+from qgis.analysis import QgsNativeAlgorithms
+QgsApplication.processingRegistry().addProvider(QgsNativeAlgorithms())
+
 import processing
+from processing.core.Processing import Processing
+
+Processing.initialize()
 
 EPS = 1e-10
