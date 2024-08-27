@@ -8,6 +8,8 @@ from qgis.core import (
     QgsPolygon,
     QgsMultiPolygon,
     QgsVectorLayer,
+    QgsLineString,
+    QgsMultiLineString,
     QgsFeature,
     QgsAbstractGeometry
 )
@@ -52,6 +54,29 @@ class Converter:
             else:
                 coords = (point.x, point.y)  # type: ignore
             self.geoms.append(QgsPoint(*coords))
+
+    def add_lines(
+        self,
+        lines: Sequence[shapely.LineString | shapely.MultiLineString]
+    ):
+        for line in lines:
+            wkt = line.wkt
+            if isinstance(line, shapely.LineString):
+                qgs_line = QgsLineString()
+                if not qgs_line.fromWkt(wkt):
+                    raise Exception(
+                        f'Failed to convert {line!r}..'
+                    )
+                self.geoms.append(qgs_line)
+            elif isinstance(line, shapely.MultiLineString):
+                qgs_multilinestring = QgsMultiLineString()
+                if not qgs_multilinestring.fromWkt(wkt):
+                    raise Exception(
+                        f'Failed to convert {line!r}.'
+                    )
+                self.geoms.append(qgs_multilinestring)
+            else:
+                raise Exception(f'{line!r} not allowed as input')
 
     def add_polygons(
         self,

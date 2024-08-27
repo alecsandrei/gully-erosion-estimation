@@ -3,11 +3,14 @@ from __future__ import annotations
 import itertools
 from typing import (
     NamedTuple,
+    TYPE_CHECKING,
     Literal,
     cast,
     Generator
 )
 from dataclasses import dataclass
+from pathlib import Path
+from functools import cached_property
 
 import pandas as pd
 import shapely.algorithms
@@ -20,13 +23,28 @@ import shapely.ops
 import shapely
 import geopandas as gpd
 import centerline.geometry
+import processing
 
 from gully_automation import EPS
+from gully_automation.converter import Converter
+
+if TYPE_CHECKING:
+    from gully_automation.dem import DEM
 
 
 def intersects(g1, g2) -> bool:
     """A wrapper 'intersects' which instead uses the distance."""
     return g1.distance(g2) < EPS
+
+
+def within(g1, g2) -> bool:
+    """A wrapper 'within' which instead uses the EPS overlap."""
+    return g1.intersection(g2).length > EPS
+
+
+def disjoint(g1, g2) -> bool:
+    """A wrapper 'disjoint' which instead uses the % overlap."""
+    return g1.intersection(g2).length < EPS
 
 
 class Endpoints(NamedTuple):
@@ -52,6 +70,11 @@ class Endpoints(NamedTuple):
             if all(intersects(endpoint, other) for endpoint in self):
                 return True
         return False
+
+    def shortest_line(self, other: shapely.Geometry):
+        l1 = shapely.shortest_line(self.start, other)
+        l2 = shapely.shortest_line(self.end, other)
+        return l1 if l1.length <= l2.length else l2
 
 
 @dataclass
@@ -136,7 +159,7 @@ def merge_downstream(
     centerline_types: CenterlineTypes,
     pour_points: gpd.GeoSeries,
     split_limit: shapely.Polygon | shapely.MultiPolygon,
-    within_limit:  shapely.Polygon | shapely.MultiPolygon
+    # within_limit:  shapely.Polygon | shapely.MultiPolygon
 ) -> list[shapely.LineString]:
     # NOTE: Works but should be optimized (use graphs?)
 
@@ -145,26 +168,10 @@ def merge_downstream(
     if split_limit.has_z:
         split_limit = to_2d(split_limit)
 
-    if within_limit.has_z:
-        within_limit = to_2d(within_limit)
+    # if within_limit.has_z:
+    #     within_limit = to_2d(within_limit)
 
-    def endpoints_intersect_limit(linestring: shapely.LineString):
-        """True if both endpoints intersect the limit."""
-        endpoints = Endpoints.from_linestring(linestring)
-        return endpoints.intersects(split_limit, how='all')
-
-    # def preprocess_inputs(lines: gpd.GeoSeries):
-    #     lines = (
-    #         lines
-    #         .clip(split_limit)
-    #         .explode(ignore_index=True, index_parts=False)
-    #     )
-    #     lines = lines[
-    #         ~lines.apply(endpoints_intersect_limit)  # type: ignore
-    #     ]
-    #     return lines
-
-    def process_inputs_2(lines: gpd.GeoSeries):
+    def process_inputs(lines: gpd.GeoSeries):
         intersecting_centerlines_bool = lines.apply(
             lambda line: intersects(line, pour_points_multipoint)
         )
@@ -177,7 +184,32 @@ def merge_downstream(
             [lines[~intersecting_centerlines_bool], split_lines],
             ignore_index=True
         )
-        return split_lines[split_lines.within(within_limit)]
+        intersection = (
+            split_lines
+            .intersection(split_limit)
+            .explode(index_parts=False, ignore_index=True)
+        )
+        line_type = (shapely.LineString, shapely.MultiLineString)
+        is_line = intersection.apply(
+            lambda geometry: isinstance(geometry, line_type)
+        )
+        not_empty = ~intersection.is_empty
+        is_starting_line = intersection.apply(
+            lambda line: intersects(line, pour_points_multipoint)
+        )
+        intersects_limit = intersection.apply(
+            lambda line: intersects(line, split_limit.boundary)
+        )
+        longer_than_epsg = intersection.length > EPS
+        # is_starting_line == intersects_limit means that the lines
+        # which intersect the boundary but do not intersects the
+        # pour points are filtered out
+        return intersection[
+            is_line
+            & not_empty
+            & (is_starting_line == intersects_limit)
+            & longer_than_epsg
+        ]
 
     assert (
         (crs1 := centerline_types.contiguous.crs)
@@ -186,8 +218,8 @@ def merge_downstream(
     ), f"CRS mismatch from input: '{crs1}', '{crs2}', '{crs3}'"
 
     crs = centerline_types.contiguous.crs
-    contiguous_lines = process_inputs_2(centerline_types.contiguous)
-    discontiguous_lines = process_inputs_2(centerline_types.discontiguous)
+    contiguous_lines = process_inputs(centerline_types.contiguous)
+    discontiguous_lines = process_inputs(centerline_types.discontiguous)
     first_lines = pd.concat(
         [contiguous_lines[contiguous_lines.intersects(pour_points_multipoint)],
          discontiguous_lines[discontiguous_lines.intersects(
@@ -198,7 +230,7 @@ def merge_downstream(
     merged = []
 
     # 'i' for debugging
-    for i, discontiguous_line in enumerate(discontiguous_lines):
+    for discontiguous_line in discontiguous_lines:
         if discontiguous_line in first_lines:
             merged.append(discontiguous_line)
             continue
@@ -216,10 +248,10 @@ def merge_downstream(
         # appending a shapely object makes the geoseries lose the crs
         contiguous_type.set_crs(crs, inplace=True)
         contiguous_first_lines = contiguous_lines[
-            contiguous_lines.intersects(pour_points_multipoint)
+            contiguous_lines.apply(lambda line: intersects(line, pour_points_multipoint))
         ]
         discontiguous_first_lines = discontiguous_lines[
-            discontiguous_lines.intersects(pour_points_multipoint)
+            discontiguous_lines.apply(lambda line: intersects(line, pour_points_multipoint))
         ]
         assert (
             (crs1 := contiguous_first_lines.crs)
@@ -281,7 +313,8 @@ def merge_downstream(
                 [merged_line, *first_line.geometry.tolist()]
             )
         assert isinstance(merged_line, shapely.LineString)
-        merged.append(merged_line)
+        if intersects(merged_line, split_limit.boundary):
+            merged.append(merged_line)
     return merged
 
 
@@ -344,7 +377,44 @@ def merge_then_explode(*linestrings: gpd.GeoSeries):
 
 def to_2d(shape):
     """Converts a three dimensional shape to a 2D."""
-    return shapely.ops.transform(lambda x, y, z: (x, y), shape)
+    if not shape.has_z:
+        return shape
+    return shapely.ops.transform(lambda x, y, _: (x, y), shape)
+
+
+def merge_intersecting_lines(linestrings: gpd.GeoSeries):
+    """Continuously merges lines that intersect."""
+    count = linestrings.shape[0]
+    _linestrings: list[shapely.LineString | shapely.MultiLineString] = []
+    while True:
+        _linestrings = []
+        for linestring in linestrings:
+            consumed = gpd.GeoSeries(_linestrings, crs=linestrings.crs)
+            not_consumed = linestrings[linestrings.apply(lambda line: consumed[consumed.contains(line)].empty)]
+            if not_consumed.empty:
+                continue
+            intersecting = not_consumed[not_consumed.intersects(linestring)]
+            if intersecting.empty:
+                continue
+            merged = shapely.ops.linemerge(intersecting.explode(index_parts=False).tolist())
+            _linestrings.append(merged)
+        linestrings = gpd.GeoSeries(_linestrings, crs=linestrings.crs)
+        if linestrings.shape[0] == count:
+            break
+        count = linestrings.shape[0]
+    return linestrings
+
+
+def dangles_gen(
+    linestrings: gpd.GeoSeries | shapely.MultiLineString | shapely.LineString
+):
+    if not isinstance(linestrings, gpd.GeoSeries):
+        linestrings = gpd.GeoSeries(linestrings)
+    for linestring in linestrings.explode(index_parts=False, ignore_index=True):
+        endpoints = Endpoints.from_linestring(linestring)
+        for point in endpoints:
+            if linestrings.intersects(point).sum() == 1:
+                yield point
 
 
 def get_pour_points(
@@ -353,65 +423,51 @@ def get_pour_points(
 ) -> gpd.GeoSeries:
     """The points that intersect with a given polygon boundary."""
 
-    points = []
-    intersections_poly = linestrings.intersection(polygon)
-    intersections_bounds = linestrings.intersection(polygon.boundary)
+    intersections_poly = (
+        linestrings
+        .intersection(polygon)
+        .explode(index_parts=False, ignore_index=True)
+    )
+    intersections_poly = intersections_poly[~intersections_poly.is_empty]
 
-    for linestring, intersection_poly, intersection_bounds in zip(
-        linestrings, intersections_poly, intersections_bounds
-    ):
-        if intersection_poly.is_empty:
-            continue
+    def pour_point_gen() -> Generator[shapely.Point, None, None]:
+        nonlocal intersections_poly
+        intersections_poly = cast(
+            gpd.GeoSeries, intersections_poly
+        )
+        disallowed_points = shapely.MultiPoint(gen_disallowed_points())
+        intersections_poly = intersections_poly[~intersections_poly.intersects(disallowed_points)]
+        linestrings_preprocessed = merge_intersecting_lines(intersections_poly)
+        for linestring in linestrings_preprocessed.geometry:
+            dangles_intersecting = []
+            for dangle in dangles_gen(linestring):
+                if intersects(dangle, polygon.boundary):
+                    dangles_intersecting.append(dangle)
+            n_dangles = len(dangles_intersecting)
+            assert n_dangles != 0
+            if n_dangles == 1:
+                yield dangles_intersecting[0]
 
-        # if len(points) == 8 and linestrings[linestrings == linestring].index[0] == 113:
-        #     breakpoint()
+    def gen_disallowed_points() -> list[shapely.Point]:
+        """The endpoints of the lines that should be omitted."""
+        diff = linestrings.difference(polygon)
+        diff = diff[~diff.is_empty]
+        orphaned = diff[diff.apply(lambda line: is_orphaned(line, diff))]
+        dangles = []
+        for dangle in dangles_gen(orphaned):
+            if intersects(dangle, polygon.boundary):
+                dangles.append(dangle)
+        for intersection in intersections_poly:
+            endpoints = Endpoints.from_linestring(intersection)
+            if endpoints.intersects(polygon.boundary, how='all'):
+                for endpoint in endpoints:
+                    try:
+                        dangles.remove(endpoint)
+                    except ValueError:
+                        continue
+        return dangles
 
-        disallowed_points: list[shapely.Point] = []
-        if isinstance(intersection_poly, shapely.MultiLineString):
-            differences = linestring.difference(polygon)
-            if isinstance(differences, shapely.LineString):
-                differences = shapely.MultiLineString([differences])
-            for intersection in differences.geoms:
-                endpoints = Endpoints.from_linestring(intersection)
-                if endpoints.intersects(polygon.boundary, how='all'):
-                    disallowed_points.extend(endpoints)
-        elif isinstance(intersection_poly, shapely.LineString):
-            endpoints = Endpoints.from_linestring(intersection_poly)
-            if (
-                endpoints.intersects(polygon.boundary, how='all')
-                or is_orphaned(intersection_poly, intersections_poly)
-            ):
-                disallowed_points.extend(endpoints)
-        disallowed_points = shapely.MultiPoint(
-            disallowed_points
-        )  # type: ignore
-        if isinstance(intersection_bounds, shapely.MultiPoint):
-            for point in intersection_bounds.geoms:
-                if not intersects(point, disallowed_points):
-                    points.append(point)
-        elif isinstance(intersection_bounds, shapely.Point):
-            if not intersects(intersection_bounds, disallowed_points):
-                points.append(intersection_bounds)
-    return gpd.GeoSeries(points, crs=linestrings.crs)
-
-
-def get_linestring_endpoints(
-    linestrings: gpd.GeoSeries
-) -> list[Endpoints]:
-    endpoints = []
-    for linestring in linestrings:
-        endpoints.append(Endpoints.from_linestring(linestring))
-    return endpoints
-
-
-def geometry_difference(
-    geom: gpd.GeoSeries,
-    polygon: shapely.Polygon,
-) -> gpd.GeoSeries:
-    """Gets the difference between a polygon and a geometry."""
-    diff = geom.difference(polygon)
-    diff = diff[~diff.is_empty]
-    return diff.explode(ignore_index=True, index_parts=False)
+    return gpd.GeoSeries(pour_point_gen(), crs=linestrings.crs)
 
 
 def is_orphaned(
@@ -427,9 +483,55 @@ def is_orphaned(
     return True
 
 
-class GullyBed(NamedTuple):
+@dataclass
+class GullyBed:
     centerline: shapely.LineString
     profile: shapely.LineString
+
+    @property
+    def merged(self):
+        return self.merge()
+
+    def merge(self) -> shapely.LineString:
+        centerline_endpoints = Endpoints.from_linestring(self.centerline)
+        profile_endpoints = Endpoints.from_linestring(self.profile)
+        l1 = profile_endpoints.shortest_line(centerline_endpoints.start)
+        l2 = profile_endpoints.shortest_line(centerline_endpoints.end)
+        if l1.length <= l2.length:
+            shortest_line = l1
+        else:
+            self.centerline = self.centerline.reverse()
+            shortest_line = l2
+        shortest_line = l1 if l1.length <= l2.length else l2
+        # The order of the lines in the list is relevant here.
+        # We reverse so that we start from the gully head.
+        merged = shapely.ops.linemerge(
+            [self.profile, shortest_line, self.centerline]
+        ).reverse()
+        assert isinstance(merged, shapely.LineString), 'Expected linestring.'
+        return merged
+
+
+def plot_gully_beds(gully_beds: list[GullyBed], dem: DEM, epsg: str, out_folder: Path):
+    profiles = dem.sample([bed.merged for bed in gully_beds], epsg)
+
+    def plot_one(profile: gpd.GeoDataFrame):
+        data = profile['Z']
+        data.plot()
+        import matplotlib.pyplot as plt
+        plt.savefig(out_folder / f'{profile["ID_LINE"].iloc[0]}.png', dpi=300)
+        plt.close()
+
+    line_id_col = (
+        'LINE_ID' if 'LINE_ID' in profiles.columns
+        else 'ID_LINE' if 'ID_LINE' in profiles.columns
+        else None
+    )
+    if line_id_col is None:
+        raise ValueError(f'Could not find the LINE_ID column in {profiles.columns}')
+
+    for line_id in profiles[line_id_col].unique():
+        plot_one(profiles[profiles[line_id_col] == line_id])
 
 
 def map_centerlines_and_profiles(
@@ -441,14 +543,17 @@ def map_centerlines_and_profiles(
     # The distance between the centerline and the profile
     # should not be bigger than the pixel size of the DEM.
     for centerline_ in centerlines:
-        pour_point = pour_points[pour_points.intersects(centerline_)]
+        pour_point = pour_points[
+            pour_points.apply(lambda point: intersects(point, centerline_))
+        ]
         assert (
-            pour_point.shape[0] == 1
-        ), 'Expected zero or one pour points.'
+            pour_point.shape[0] in (0, 1)
+        ), f'Expected zero or one pour points, found {pour_point.shape[0]}.'
+        if pour_point.shape[0] == 0:
+            print(pour_point)
+            continue
         pour_point = pour_point.iloc[0]
-        # Drop duplicates because it's possible there are duplicate profiles
-        # E.g when there are two pour points close, within grid_size
-        # distance of each other
+        # Drop duplicates because it's possible there are duplicaK
         gdf: gpd.GeoDataFrame = (
             profiles
             .to_frame()
@@ -457,17 +562,11 @@ def map_centerlines_and_profiles(
         gdf['distance'] = gdf.distance(pour_point)
         gdf.sort_values(by='distance', inplace=True)
         profile = gdf.iloc[0]
-        # profile = (
-        #     profiles[ < grid_size]
-        #     .drop_duplicates()
-        # )
-        # assert (
-        #     (profile_shape := profile.shape[0]) in (0, 1)
-        # ), 'Expected zero or one profiles.'
-        if profile['distance'] > grid_size:
+        if profile['distance'] > grid_size * 2:
             # It's possible that some pour points do not have profiles.
             # E.g when the user does not correctly define
-            # the boundary of the gully.
+            # the boundary of the gully, and the profile falls
+            # outside the boundary.
             continue
         profile = profile.iloc[0]
         assert isinstance(profile, shapely.LineString)

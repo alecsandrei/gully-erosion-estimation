@@ -31,6 +31,12 @@ def vector_layers_to_geodataframe(
     return df
 
 
+def qgis_vector_to_geodataframe(
+    vector_layer: QgsVectorLayer
+):
+    return gpd.GeoDataFrame.from_features(vector_layer.getFeatures())
+
+
 def plot(**series: gpd.GeoSeries):
     fig = plt.figure()
     ax = fig.add_subplot()

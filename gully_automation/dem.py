@@ -17,9 +17,9 @@ from qgis.core import (
     QgsCoordinateTransformContext,
     QgsProcessingFeatureSourceDefinition,
     QgsCoordinateReferenceSystem,
-    QgsVectorLayerExporter
+    QgsVectorLayerExporter,
 )
-from qgis.PyQt.QtCore import QVariant
+from qgis.PyQt.QtCore import QMetaType
 import shapely.geometry
 
 from gully_automation.geometry import is_orphaned
@@ -103,7 +103,7 @@ class DEM:
         converter.add_polygons([self.mask])
         assert self.epsg is not None
         mask_as_qgs_vector_layer = converter.to_vector_layer(self.epsg)
-        masked_dem = processing.run("gdal:cliprasterbymasklayer", {
+        masked_dem = processing.run('gdal:cliprasterbymasklayer', {
             'INPUT': self.dem.as_posix(),
             'MASK': mask_as_qgs_vector_layer,
             'SOURCE_CRS': QgsCoordinateReferenceSystem(f'EPSG:{self.epsg}'),
@@ -123,7 +123,26 @@ class DEM:
             'OUTPUT': 'TEMPORARY_OUTPUT'})
         return Path(masked_dem['OUTPUT'])
 
-    def profiles(
+    def sample(
+        self,
+        shapes: list[shapely.LineString],
+        epsg: str
+    ) -> gpd.GeoDataFrame:
+        converter = Converter()
+        converter.add_lines(shapes)
+
+        profiles = processing.run('sagang:profilesfromlines', {
+            'DEM': self.dem_preproc.as_posix(),
+            'VALUES': None,
+            'LINES': converter.to_vector_layer(epsg),
+            'NAME': 'FID',
+            'PROFILE': 'TEMPORARY_OUTPUT',
+            'PROFILES': 'TEMPORARY_OUTPUT',
+            'SPLIT': False
+        })
+        return gpd.read_file(profiles['PROFILE'])
+
+    def line_profiles(
         self,
         points: Sequence[shapely.Point],
         epsg: str = '3844',
@@ -143,8 +162,8 @@ class DEM:
             provider = layer.dataProvider()
             provider.addAttributes(
                 [
-                    QgsField('x', QVariant.Double),
-                    QgsField('y', QVariant.Double),
+                    QgsField('x', QMetaType.Type.Double),
+                    QgsField('y', QMetaType.Type.Double),
                 ]
             )
             layer.updateFields()
@@ -205,7 +224,7 @@ class DEM:
         ))
         profiles_orphaned = profiles_geoms[orphaned]
         print(
-            f'Found {profiles_orphaned.shape[0]} profiles which'
+            f'Found {profiles_orphaned.shape[0]} profiles which '
             'would fall outside of the defined boundary'
         )
         profiles_valid: gpd.GeoSeries = profiles_geoms[
@@ -214,6 +233,7 @@ class DEM:
         if out_file:
             profiles_valid.to_file(out_file)
         return profiles_valid
+
 
 if __name__ == '__main__':
 
