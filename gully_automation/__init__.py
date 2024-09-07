@@ -1,4 +1,5 @@
 import sys
+import os
 from qgis.core import *
 import osgeo.ogr
 
@@ -39,4 +40,6 @@ from processing.core.Processing import Processing
 
 Processing.initialize()
 
-EPS = 1e-5
+EPS = os.getenv('EPSILON', 1e-5)
+DEBUG = int(os.getenv('DEBUG', 0))
+CACHE = int(os.getenv('CACHE', 0))

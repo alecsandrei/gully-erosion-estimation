@@ -1,68 +1,88 @@
-from pathlib import Path
-from typing import Literal
-import time
+from __future__ import annotations
 
+from pathlib import Path
+import typing as t
+
+import matplotlib.pyplot as plt
 import geopandas as gpd
-import shapely
+import pandas as pd
+from gully_automation import DEBUG, CACHE
 from gully_automation.geometry import (
     get_centerline,
     merge_linestrings,
     CenterlineTypes,
     get_pour_points,
     merge_downstream,
+    aggregate_overlapping_points,
+    estimate_gully_beds,
     map_centerlines_and_profiles,
-    plot_gully_beds
 )
-from gully_automation.dem import DEM
-from gully_automation.utils import vector_layers_to_geodataframe
+from gully_automation.dem import DEM, multilevel_b_spline, Evaluate, inverse_distance_weighted
+from gully_automation.changepoint import find_changepoints, plot_changepoints, estimate_gully
 
 
-def run(gpkg: Path, dem: Path, out_folder: Path, use_cached=True):
+def debug_profiles(model: Models, profile_samples):
+    profiles = Path('./data/derived/profiles')
+    if not profiles.exists():
+        profiles.mkdir()
+    model_profiles = profiles / model
+    if not model_profiles.exists():
+        model_profiles.mkdir()
+    for id_ in profile_samples['ID_LINE'].unique():
+        out_file = model_profiles / f'{id_}.png'
+        profile = profile_samples.loc[profile_samples['ID_LINE'] == id_, 'Z']
+        plot_changepoints(profile.values, find_changepoints(profile.values), out_file=out_file)
+
+
+def run(gpkg: Path, dem: Path, truth_dem: Path, out_folder: Path):
+    model = gpkg.stem
+    out_folder = out_folder / model
+    if not out_folder.exists():
+        out_folder.mkdir()
     try:
         _2003_gdf = gpd.read_file(gpkg, layer='2003')
     except:
         ...
     _2012_gdf = gpd.read_file(gpkg, layer='2012', engine='fiona')
+    EPSG = _2012_gdf.crs.to_epsg()
     _2019_gdf = gpd.read_file(gpkg, layer='2019', engine='fiona')
     _2012_polygon = _2012_gdf.geometry[0]
     _2019_polygon = _2019_gdf.geometry[0]
     _2012_2019_diff = _2019_polygon.difference(_2012_polygon)
-
-    if use_cached:
+    dem_processor = DEM(dem, mask=_2012_polygon,
+                        epsg=EPSG)
+    dem_truth_processor = DEM(truth_dem, epsg=EPSG)
+    if CACHE:
         _2012_centerline_types = CenterlineTypes.from_linestrings(
-            gpd.read_file(out_folder / '2012_centerline.shp')
+            gpd.read_file(out_folder / f'{model}_2012_centerline.shp')
         )
         _2019_centerline_types = CenterlineTypes.from_linestrings(
-            gpd.read_file(out_folder / '2019_centerline.shp')
+            gpd.read_file(out_folder / f'{model}_2019_centerline.shp')
         )
-        _2019_merged = gpd.read_file(out_folder / '2019_merged.shp')
-        pour_points = gpd.read_file(out_folder / 'pour_points.shp')
-        merged_downstream = gpd.read_file(out_folder / 'merged_downstream.shp')
-        profiles_2012 = gpd.read_file(out_folder / 'profiles_2012.shp')
+        _2019_merged = gpd.read_file(out_folder / f'{model}_2019_merged.shp')
+        pour_points = gpd.read_file(out_folder / f'{model}_pour_points.shp').geometry
+        merged_downstream = gpd.read_file(out_folder / f'{model}_merged_downstream.shp').geometry
+        profiles_2012 = gpd.read_file(out_folder / f'{model}_profiles_2012.shp').geometry
+        print('read cached features')
     else:
         _2012_centerline = get_centerline(_2012_gdf.geometry[0], _2012_gdf.crs)
-        # _2012_centerline.to_file(out_folder / '2012_centerline.shp')
+        _2012_centerline.to_file(out_folder / f'{model}_2012_centerline.shp')
         _2012_centerline_types = CenterlineTypes.from_linestrings(
             _2012_centerline
         )
         _2019_centerline = get_centerline(_2019_gdf.geometry[0], _2019_gdf.crs)
-        # _2019_centerline.to_file(out_folder / '2019_centerline.shp')
+        _2019_centerline.to_file(out_folder / f'{model}_2019_centerline.shp')
         _2019_centerline_types = CenterlineTypes.from_linestrings(
             _2019_centerline
         )
 
         _2012_centerline_types.clean_orphaned()
-        _2012_centerline_types.contiguous.to_file(out_folder / '2012_centerlines_contiguous.shp')
-        _2012_centerline_types.discontiguous.to_file(out_folder / '2012_centerlines_discontiguous.shp')
-
         _2019_centerline_types.clean_orphaned()
-        _2019_centerline_types.contiguous.to_file(out_folder / '2019_centerlines_contiguous.shp')
-        _2019_centerline_types.discontiguous.to_file(out_folder / '2019_centerlines_discontiguous.shp')
 
         _2019_merged = merge_linestrings(*_2019_centerline_types)
-        _2019_merged.to_file(out_folder / '2019_merged.shp')
+        _2019_merged.to_file(out_folder / f'{model}_2019_merged.shp')
         pour_points = get_pour_points(_2019_merged, _2012_2019_diff)
-        pour_points.to_file(out_folder / 'pour_points.shp')
+        pour_points.to_file(out_folder / f'{model}_pour_points.shp')
         merged_downstream = gpd.GeoSeries(  # type: ignore
             merge_downstream(
                 _2019_centerline_types, pour_points,
@@ -70,46 +90,126 @@ def run(gpkg: Path, dem: Path, out_folder: Path, use_cached=True):
             ),
             crs=_2012_gdf.crs
         )
-        merged_downstream.to_file(out_folder / 'merged_downstream.shp')
-        dem_processor = DEM(dem, mask=_2012_polygon,
-                            epsg=_2012_gdf.crs.to_epsg())
+        merged_downstream.to_file(out_folder / f'{model}_merged_downstream.shp')
         profiles_2012 = dem_processor.line_profiles(
             pour_points,
-            out_file=out_folder / 'profiles_2012.shp'
+            out_file=out_folder / f'{model}_profiles_2012.shp'
         ).geometry
-        gully_bed = map_centerlines_and_profiles(
-            merged_downstream,
-            profiles_2012,
-            pour_points,
-            dem_processor.size_x
-        )
-        gully_beds = list(gully_bed)
-        profiles = Path('./data/derived/profiles')
-        if not profiles.exists():
-            profiles.mkdir()
-        model_profiles = profiles / gpkg.stem
-        if not model_profiles.exists():
-            model_profiles.mkdir()
-        plot_gully_beds(
-            gully_beds,
-            dem=dem_processor,
-            epsg=_2012_gdf.crs.to_epsg(),
-            out_folder=model_profiles
+
+    gully_bed = map_centerlines_and_profiles(
+        merged_downstream,
+        profiles_2012,
+        pour_points,
+        dem_processor.size_x
+    )
+    gully_beds = list(gully_bed)
+    centerline_sample = dem_processor.sample(
+        [gully_bed.centerline for gully_bed in gully_beds], EPSG
+    )
+    profile_sample = dem_processor.sample(
+        [gully_bed.profile for gully_bed in gully_beds], EPSG
+    )
+
+    def debug_profiles():
+        profiles_dir = out_folder / 'profiles'
+        profiles_dir.mkdir(exist_ok=True)
+        for id_ in profile_sample['ID_LINE'].unique():
+            fig, ax = plt.subplots(figsize=(12, 5))
+            subset = profile_sample.loc[profile_sample['ID_LINE'] == id_, 'Z'].reset_index(drop=True)
+            subset_before = centerline_sample.loc[centerline_sample['ID_LINE'] == id_, 'Z'].reset_index(drop=True)
+            subset_before.index = range(subset.index[-1] + 1, subset_before.shape[0] + subset.index[-1] + 1)
+            subset_before.plot(ax=ax)
+            subset.plot(ax=ax)
+            plt.savefig(profiles_dir / f'{id_}.png')
+            plt.close()
+
+    def debug_estimations():
+        estimations = out_folder / 'estimation'
+        estimations.mkdir(exist_ok=True)
+
+        for id_ in profile_sample['ID_LINE'].unique():
+            profile: pd.Series = profile_sample.loc[profile_sample['ID_LINE'] == id_, 'Z']
+            centerline: pd.Series = centerline_sample.loc[centerline_sample['ID_LINE'] == id_, 'Z']
+            estimate_gully(
+                profile.values,
+                centerline.values,
+                find_changepoints(profile.values)[0],
+            )
+            plt.savefig((estimations / f'{id_}.png'))
+            plt.close()
+            plt.show()
+
+    estimations = estimate_gully_beds(gully_beds, dem_processor, EPSG)
+    estimations_agg = t.cast(gpd.GeoDataFrame, aggregate_overlapping_points(estimations, 'Z', 'min'))
+    limit_sample = dem_processor.sample([_2019_polygon.boundary], epsg=EPSG)
+    interpolation = multilevel_b_spline(
+        pd.concat([estimations_agg, limit_sample], ignore_index=True)[['Z', 'geometry']],
+        dem_processor,
+        elevation_field='Z'
+    )
+    gully_cover = DEM(inverse_distance_weighted(limit_sample, power=1, elevation_field='Z'), epsg=EPSG)
+
+    evaluate = Evaluate(
+        dem_processor,
+        DEM(interpolation, epsg=EPSG),
+        dem_truth_processor,
+        gully_cover,
+        estimation_surface=_2012_2019_diff
+    )
+    print(evaluate.get_masked())
+
+    if DEBUG >= 1:
+        import shutil
+        limit_sample.to_file(out_folder / 'limit_sample.shp')
+        estimations.to_file(out_folder / 'estimations.shp')
+        estimations_agg.to_file(out_folder / 'estimations_agg.shp')
+
+        if (out_folder / 'interpolation').exists():
+            for file in (out_folder / 'interpolation').iterdir():
+                file.unlink()
+            (out_folder / 'interpolation').rmdir()
+        interpolation_folder = Path(shutil.move(
+            Path(interpolation).parent,
+            out_folder.resolve()
+        ))
+        interpolation_folder.rename(
+            interpolation_folder.with_name('interpolation')
         )
 
+        if (out_folder / 'cover').exists():
+            for file in (out_folder / 'cover').iterdir():
+                file.unlink()
+            (out_folder / 'cover').rmdir()
+        interpolation_folder = Path(shutil.move(
+            gully_cover.dem.parent,
+            out_folder.resolve()
+        ))
+        interpolation_folder.rename(
+            interpolation_folder.with_name('cover')
+        )
 
-Models = Literal['soldanesti_aval', 'soldanesti_amonte',
-                 'saveni_aval', 'saveni_amonte']
+        print(estimations)
+        print(interpolation)
+
+
+Models = t.Literal[
+    'soldanesti_aval',
+    'soldanesti_amonte',
+    'saveni_aval',
+    'saveni_amonte'
+]
 
 MODELS = ['soldanesti_aval', 'soldanesti_amonte', 'saveni_aval', 'saveni_amonte']
 
 
-def main(model: Models, use_cached=False):
+def main(model: Models):
     dem = Path(f'./data/{model}_2012.tif')
+    dem_truth = Path(f'./data/{model}_2019_mbs.asc')
     gpkg = Path(f'./data/{model}.gpkg')
     out_folder = Path('./data/derived')
-    run(gpkg, dem, out_folder, use_cached=use_cached)
+    run(gpkg, dem, dem_truth, out_folder)
 
 
 if __name__ == '__main__':
-    main(model=MODELS[0], use_cached=False)
+    for model in MODELS[::-1]:
+        main(model=model)

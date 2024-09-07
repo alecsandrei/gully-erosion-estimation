@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from functools import cached_property
 import time
@@ -10,21 +11,15 @@ import time
 import geopandas as gpd
 from qgis.core import (
     QgsField,
-    QgsProject,
     QgsRasterLayer,
-    QgsFeature,
-    QgsVectorFileWriter,
-    QgsCoordinateTransformContext,
-    QgsProcessingFeatureSourceDefinition,
     QgsCoordinateReferenceSystem,
-    QgsVectorLayerExporter,
 )
 from qgis.PyQt.QtCore import QMetaType
 import shapely.geometry
 
 from gully_automation.geometry import is_orphaned
 from gully_automation.converter import Converter
-from gully_automation import processing
+from gully_automation import processing, DEBUG
 from gully_automation.utils import vector_layers_to_geodataframe
 
 
@@ -34,16 +29,16 @@ PathLike = Path | str
 class DEM:
 
     def __init__(
-        self, dem: PathLike,
+        self, path: PathLike,
         mask: shapely.Polygon | shapely.MultiPolygon | None = None,
         epsg: str | None = None
     ):
-        self.dem = dem
+        self.path = path
         self.mask = mask
         self.epsg = epsg
-        if not isinstance(self.dem, Path):
-            self.dem = Path(self.dem)
-            if not self.dem.exists():
+        if not isinstance(self.path, Path):
+            self.path = Path(self.path)
+            if not self.path.exists():
                 raise FileNotFoundError('DEM file not found.')
 
     @cached_property
@@ -55,13 +50,9 @@ class DEM:
         return self.apply_mask()
 
     @cached_property
-    def dem_masked_boundary(self) -> Path:
-        return self.get_dem_masked_boundary()
-
-    @cached_property
     def qgs(self) -> QgsRasterLayer:
-        assert isinstance(self.dem, Path)
-        return QgsRasterLayer(self.dem.as_posix())
+        assert isinstance(self.path, Path)
+        return QgsRasterLayer(self.path.as_posix())
 
     @cached_property
     def size_x(self) -> float:
@@ -71,21 +62,18 @@ class DEM:
     def size_y(self) -> float:
         return self.qgs.rasterUnitsPerPixelY()
 
-    def get_dem_masked_boundary(self):
-        ...
-
     def hydro_preprocessing(self) -> Path:
         sink_route = processing.run(
             'sagang:sinkdrainageroutedetection', {
-                'ELEVATION': self.dem_masked.as_posix(),
+                'ELEVATION': self.path.as_posix(),
                 'SINKROUTE': 'TEMPORARY_OUTPUT',
                 'THRESHOLD': False,
                 'THRSHEIGHT': 100
             }
         )
         dem_preproc = processing.run(
-            "sagang:sinkremoval", {
-                'DEM': self.dem_masked.as_posix(),
+            'sagang:sinkremoval', {
+                'DEM': self.path.as_posix(),
                 'SINKROUTE': sink_route['SINKROUTE'],
                 'DEM_PREPROC': 'TEMPORARY_OUTPUT',
                 'METHOD': 1,
@@ -95,32 +83,43 @@ class DEM:
         )
         return Path(dem_preproc['DEM_PREPROC'])
 
-    def apply_mask(self) -> Path:
-        if self.mask is None or self.epsg is None:
-            return self.dem
+    def apply_mask(
+        self,
+        mask: shapely.Polygon | shapely.MultiPolygon | None = None
+    ) -> Path:
+        if mask is None:
+            mask = self.mask
         converter = Converter()
-        assert self.mask is not None
-        converter.add_polygons([self.mask])
+        assert mask is not None
+        converter.add_polygons([mask])
         assert self.epsg is not None
         mask_as_qgs_vector_layer = converter.to_vector_layer(self.epsg)
-        masked_dem = processing.run('gdal:cliprasterbymasklayer', {
-            'INPUT': self.dem.as_posix(),
-            'MASK': mask_as_qgs_vector_layer,
-            'SOURCE_CRS': QgsCoordinateReferenceSystem(f'EPSG:{self.epsg}'),
-            'TARGET_CRS': QgsCoordinateReferenceSystem(f'EPSG:{self.epsg}'),
-            'TARGET_EXTENT': None,
-            'NODATA': None,
-            'ALPHA_BAND': False,
-            'CROP_TO_CUTLINE': False,
-            'KEEP_RESOLUTION': False,
-            'SET_RESOLUTION': False,
-            'X_RESOLUTION': None,
-            'Y_RESOLUTION': None,
-            'MULTITHREADING': False,
-            'OPTIONS': '',
-            'DATA_TYPE': 0,
-            'EXTRA': '',
-            'OUTPUT': 'TEMPORARY_OUTPUT'})
+        # masked_dem = processing.run(
+        #     'gdal:cliprasterbymasklayer', {
+        #         'INPUT': self.path.as_posix(),
+        #         'MASK': mask_as_qgs_vector_layer,
+        #         'SOURCE_CRS': QgsCoordinateReferenceSystem(f'EPSG:{self.epsg}'),
+        #         'TARGET_CRS': QgsCoordinateReferenceSystem(f'EPSG:{self.epsg}'),
+        #         'TARGET_EXTENT': None,
+        #         'NODATA': None,
+        #         'ALPHA_BAND': False,
+        #         'CROP_TO_CUTLINE': False,
+        #         'KEEP_RESOLUTION': False,
+        #         'SET_RESOLUTION': False,
+        #         'X_RESOLUTION': None,
+        #         'Y_RESOLUTION': None,
+        #         'MULTITHREADING': False,
+        #         'OPTIONS': '',
+        #         'DATA_TYPE': 0,
+        #         'EXTRA': '',
+        #         'OUTPUT': 'TEMPORARY_OUTPUT'}
+        # )
+        masked_dem = processing.run('sagang:cliprasterwithpolygon', {
+            'INPUT': [self.path.as_posix()],
+            'OUTPUT': 'TEMPORARY_OUTPUT',
+            'POLYGONS': mask_as_qgs_vector_layer,
+            'EXTENT': 1
+        })
         return Path(masked_dem['OUTPUT'])
 
     def sample(
@@ -166,6 +165,8 @@ class DEM:
                     QgsField('y', QMetaType.Type.Double),
                 ]
             )
+            if DEBUG >= 1:
+                print(f'UPDATING FIELDS FOR {type(layer)}.')
             layer.updateFields()
             layer.startEditing()
             for i in range(1, layer.featureCount() + 1):
@@ -233,6 +234,80 @@ class DEM:
         if out_file:
             profiles_valid.to_file(out_file)
         return profiles_valid
+
+
+def multilevel_b_spline(
+    points: gpd.GeoDataFrame,
+    dem: DEM,
+    elevation_field: str = 'Z'
+) -> Path:
+    converter = Converter()
+    converter.add_points(points.geometry)
+    converter.add_attribute(
+        type_=QMetaType.Double,
+        name='Z',
+        values=points['Z']
+    )
+    vector_layer = converter.to_vector_layer(epsg=points.crs.to_epsg())
+    return Path(processing.run('sagang:multilevelbspline', {
+        'SHAPES': vector_layer,
+        'FIELD': elevation_field,
+        'TARGET_USER_XMIN TARGET_USER_XMAX TARGET_USER_YMIN TARGET_USER_YMAX': None,
+        'TARGET_USER_SIZE': dem.size_x,
+        'TARGET_USER_FITS': 0,
+        'TARGET_OUT_GRID': 'TEMPORARY_OUTPUT',
+        'METHOD': 0,
+        'EPSILON': 0.0001,
+        'LEVEL_MAX': 14
+    })['TARGET_OUT_GRID'])
+
+
+def inverse_distance_weighted(points: gpd.GeoDataFrame, power: int = 1, elevation_field: str = 'Z'):
+    if 'Z' not in points:
+        raise NotImplementedError(
+            'Input geodataframe should have a Z column.'
+        )
+    converter = Converter()
+    converter.add_points(points.geometry)
+    converter.add_attribute(
+        type_=QMetaType.Double,
+        name='Z',
+        values=points['Z']
+    )
+    vector_layer = converter.to_vector_layer(epsg=points.crs.to_epsg())
+    return Path(processing.run('sagang:inversedistanceweightedinterpolation', {
+        'POINTS': vector_layer,
+        'FIELD': 'Z',
+        'CV_METHOD': 0,
+        'CV_SUMMARY': 'TEMPORARY_OUTPUT',
+        'CV_RESIDUALS': 'TEMPORARY_OUTPUT',
+        'CV_SAMPLES': 10,
+        'TARGET_USER_XMIN TARGET_USER_XMAX TARGET_USER_YMIN TARGET_USER_YMAX': None,
+        'TARGET_USER_SIZE': 0.5,
+        'TARGET_USER_FITS': 0,
+        'TARGET_OUT_GRID': 'TEMPORARY_OUTPUT',
+        'SEARCH_RANGE': 1,
+        'SEARCH_RADIUS': 1000,
+        'SEARCH_POINTS_ALL': 1,
+        'SEARCH_POINTS_MIN': 1,
+        'SEARCH_POINTS_MAX': 20,
+        'DW_WEIGHTING': 1,
+        'DW_IDW_POWER': power,
+        'DW_BANDWIDTH': 1
+    })['TARGET_OUT_GRID'])
+
+
+@dataclass
+class Evaluate:
+    dem: DEM
+    estimation_dem: DEM
+    truth_dem: DEM
+    gully_cover: DEM
+    estimation_surface: shapely.Polygon
+
+    def get_masked(self):
+        return [dem.apply_mask(self.estimation_surface) for dem in
+                (self.dem, self.estimation_dem, self.truth_dem, self.gully_cover)]
 
 
 if __name__ == '__main__':

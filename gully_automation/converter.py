@@ -1,7 +1,10 @@
 """Used to convert between shapely and QGIS."""
 
-from typing import Sequence
+from __future__ import annotations
+
+from typing import Sequence, TypedDict
 from collections import UserList
+import itertools
 
 from qgis.core import (
     QgsPoint,
@@ -13,8 +16,11 @@ from qgis.core import (
     QgsFeature,
     QgsAbstractGeometry
 )
+from qgis.core import QgsField
+from qgis.PyQt.QtCore import QMetaType
 import shapely.geometry
 
+from gully_automation import DEBUG
 
 class InvalidGeometry(Exception):
     def __init__(self, geometry: QgsAbstractGeometry):
@@ -38,11 +44,18 @@ class Geoms(UserList[QgsAbstractGeometry]):
         super().append(geom)
 
 
+class Attribute(TypedDict):
+    name: str
+    type_: QMetaType
+    values: Sequence
+
+
 class Converter:
-    """Used to convert between Shapely and PyQGIS geometry."""
+    """Used to convert geometries between Shapely and PyQGIS."""
 
     def __init__(self):
         self.geoms = Geoms()
+        self.attributes: list[Attribute] = []
 
     def add_points(
         self,
@@ -57,7 +70,9 @@ class Converter:
 
     def add_lines(
         self,
-        lines: Sequence[shapely.LineString | shapely.MultiLineString]
+        lines: (
+            Sequence[shapely.LineString | shapely.MultiLineString]
+        )
     ):
         for line in lines:
             wkt = line.wkt
@@ -101,7 +116,23 @@ class Converter:
             else:
                 raise Exception(f'{polygon!r} not allowed as input')
 
+    def add_attribute(
+        self, type_: QMetaType, name: str, values: Sequence
+    ):
+        self.attributes.append(
+            {'name': name,
+             'type_': type_,
+             'values': values}
+        )
+
     def to_vector_layer(self, epsg: str):
+        for attribute in self.attributes:
+            if (
+                (len1 := len(attribute['values'])) and len1 != (len2 := len(self.geoms))
+            ):
+                raise Exception(
+                    f'Shape mismatch between attributes and geometries: {len1} {len2}.'
+                )
         types = set()
         for geom in self.geoms:
             types.add(geom.geometryType())
@@ -113,11 +144,33 @@ class Converter:
             f'{geometry_name}?crs=epsg:{epsg}', 'converted', 'memory'
         )
         pr = layer.dataProvider()
+        if self.attributes:
+            for attribute in self.attributes:
+                if DEBUG >= 1:
+                    print(f'Adding field {attribute["name"]} to the layer.')
+                pr.addAttributes(
+                    [
+                        QgsField(attribute['name'], attribute['type_']),
+                        QgsField(attribute['name'], attribute['type_'])
+                    ]
+                )
+            if DEBUG >= 1:
+                print(f'UPDATING FIELDS FOR {type(layer)}.')
+            layer.updateFields()
         layer.startEditing()
         features = []
-        for geom in self.geoms:
+        attribute_values = zip(
+            *[attribute['values'] for attribute in self.attributes]
+        )
+        for geom, values in itertools.zip_longest(
+            self.geoms,
+            attribute_values,
+            fillvalue=None
+        ):
             feature = QgsFeature()
             feature.setGeometry(geom)
+            if self.attributes:
+                feature.setAttributes(list(values))
             features.append(feature)
         pr.addFeatures(features)
         layer.commitChanges()

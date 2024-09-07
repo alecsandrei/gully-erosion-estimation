@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import itertools
-from typing import (
-    NamedTuple,
-    TYPE_CHECKING,
-    Literal,
-    cast,
-    Generator
-)
-from dataclasses import dataclass
+import typing as t
+# from typing import (
+#     NamedTuple,
+#     TYPE_CHECKING,
+#     Literal,
+#     cast,
+#     Generator
+# )
+from dataclasses import dataclass, field
 from pathlib import Path
 from functools import cached_property
 
@@ -24,11 +25,13 @@ import shapely
 import geopandas as gpd
 import centerline.geometry
 import processing
+from qgis.PyQt.QtCore import QMetaType
 
 from gully_automation import EPS
+from gully_automation.changepoint import estimate_gully, find_changepoints
 from gully_automation.converter import Converter
 
-if TYPE_CHECKING:
+if t.TYPE_CHECKING:
     from gully_automation.dem import DEM
 
 
@@ -47,7 +50,7 @@ def disjoint(g1, g2) -> bool:
     return g1.intersection(g2).length < EPS
 
 
-class Endpoints(NamedTuple):
+class Endpoints(t.NamedTuple):
 
     start: shapely.Point
     end: shapely.Point
@@ -61,7 +64,7 @@ class Endpoints(NamedTuple):
 
     def intersects(
         self,
-        other: shapely.Geometry, how: Literal['any', 'all'] = 'any'
+        other: shapely.Geometry, how: t.Literal['any', 'all'] = 'any'
     ) -> bool:
         if how == 'any':
             if any(intersects(endpoint, other) for endpoint in self):
@@ -101,14 +104,14 @@ class CenterlineTypes:
                 feature, self.contiguous, self.discontiguous
             )
         )
-        self.contiguous = cast(gpd.GeoSeries, self.contiguous[~bool_])
+        self.contiguous = t.cast(gpd.GeoSeries, self.contiguous[~bool_])
 
         bool_ = self.discontiguous.apply(
             lambda feature: is_orphaned(
                 feature, self.contiguous, self.discontiguous
             )
         )
-        self.discontiguous = cast(gpd.GeoSeries, self.discontiguous[~bool_])
+        self.discontiguous = t.cast(gpd.GeoSeries, self.discontiguous[~bool_])
 
     def extract_discontiguous_endpoints(self) -> gpd.GeoSeries:
         points = []
@@ -430,9 +433,9 @@ def get_pour_points(
     )
     intersections_poly = intersections_poly[~intersections_poly.is_empty]
 
-    def pour_point_gen() -> Generator[shapely.Point, None, None]:
+    def pour_point_gen() -> t.Generator[shapely.Point, None, None]:
         nonlocal intersections_poly
-        intersections_poly = cast(
+        intersections_poly = t.cast(
             gpd.GeoSeries, intersections_poly
         )
         disallowed_points = shapely.MultiPoint(gen_disallowed_points())
@@ -487,26 +490,26 @@ def is_orphaned(
 class GullyBed:
     centerline: shapely.LineString
     profile: shapely.LineString
+    shortest_line: shapely.LineString = field(init=False)
+
+    def __post_init__(self):
+        # By doing this, we make sure that the
+        # centerline and the profile are continuous.
+        centerline_endpoints = Endpoints.from_linestring(self.centerline)
+        profile_endpoints = Endpoints.from_linestring(self.profile)
+        l1 = profile_endpoints.shortest_line(centerline_endpoints.start)
+        l2 = profile_endpoints.shortest_line(centerline_endpoints.end)
+        if l1.length <= l2.length:
+            self.centerline = self.centerline.reverse()
+        self.shortest_line = l1 if l1.length <= l2.length else l2
 
     @property
     def merged(self):
         return self.merge()
 
     def merge(self) -> shapely.LineString:
-        centerline_endpoints = Endpoints.from_linestring(self.centerline)
-        profile_endpoints = Endpoints.from_linestring(self.profile)
-        l1 = profile_endpoints.shortest_line(centerline_endpoints.start)
-        l2 = profile_endpoints.shortest_line(centerline_endpoints.end)
-        if l1.length <= l2.length:
-            shortest_line = l1
-        else:
-            self.centerline = self.centerline.reverse()
-            shortest_line = l2
-        shortest_line = l1 if l1.length <= l2.length else l2
-        # The order of the lines in the list is relevant here.
-        # We reverse so that we start from the gully head.
         merged = shapely.ops.linemerge(
-            [self.profile, shortest_line, self.centerline]
+            [self.profile, self.shortest_line, self.centerline]
         ).reverse()
         assert isinstance(merged, shapely.LineString), 'Expected linestring.'
         return merged
@@ -534,12 +537,49 @@ def plot_gully_beds(gully_beds: list[GullyBed], dem: DEM, epsg: str, out_folder:
         plot_one(profiles[profiles[line_id_col] == line_id])
 
 
+def estimate_gully_beds(gully_beds: list[GullyBed], dem: DEM, epsg: str):
+    profiles = [bed.profile for bed in gully_beds]
+    centerline = [bed.centerline for bed in gully_beds]
+    profile_sample = dem.sample(profiles, epsg)
+    centerline_sample = dem.sample(centerline, epsg)
+
+    line_id_col = (
+        'LINE_ID' if 'LINE_ID' in profile_sample
+        else 'ID_LINE' if 'ID_LINE' in profile_sample
+        else None
+    )
+
+    def estimate(id_) -> gpd.GeoDataFrame:
+        profile: gpd.GeoDataFrame = profile_sample.loc[profile_sample[line_id_col] == id_]
+        centerline: gpd.GeoDataFrame = centerline_sample.loc[centerline_sample[line_id_col] == id_]
+        estimation = estimate_gully(
+            profile['Z'].values,
+            centerline['Z'].values,
+            find_changepoints(profile['Z'].values)[0]
+        )
+        estimation_profile = pd.concat(
+            [centerline.geometry, profile.geometry], ignore_index=True
+        ).to_frame()
+        estimation_profile['Z'] = estimation
+        estimation_profile[line_id_col] = id_
+        return estimation_profile
+
+    estimations = None
+    for id_ in profile_sample[line_id_col].unique():
+        estimation = estimate(id_)
+        if estimations is None:
+            estimations = estimation
+        else:
+            estimations = pd.concat([estimations, estimation], ignore_index=True)
+    return estimations
+
+
 def map_centerlines_and_profiles(
     centerlines: gpd.GeoSeries,
     profiles: gpd.GeoSeries,
     pour_points: gpd.GeoSeries,
     grid_size: float
-) -> Generator[GullyBed, None, None]:
+) -> t.Generator[GullyBed, None, None]:
     # The distance between the centerline and the profile
     # should not be bigger than the pixel size of the DEM.
     for centerline_ in centerlines:
@@ -572,3 +612,21 @@ def map_centerlines_and_profiles(
         assert isinstance(profile, shapely.LineString)
         assert isinstance(centerline_, shapely.LineString)
         yield GullyBed(centerline_, profile)
+
+
+def aggregate_overlapping_points(
+    points: gpd.GeoDataFrame,
+    value_field: str,
+    method: t.Literal['min', 'max', 'mean', 'median'] = 'min'
+):
+    df = (
+        points[[value_field, points.active_geometry_name]]
+        .groupby(points.active_geometry_name)
+        .agg(method)
+        .reset_index()
+    )
+    return gpd.GeoDataFrame(
+        df,
+        geometry=points.active_geometry_name,
+        crs=points.crs
+    )
