@@ -17,7 +17,7 @@ from gully_automation.geometry import (
     estimate_gully_beds,
     map_centerlines_and_profiles,
 )
-from gully_automation.dem import DEM, multilevel_b_spline, Evaluate, inverse_distance_weighted
+from gully_automation.raster import DEM, multilevel_b_spline, Evaluate, inverse_distance_weighted, align_rasters
 from gully_automation.changepoint import find_changepoints, plot_changepoints, estimate_gully
 
 
@@ -144,19 +144,29 @@ def run(gpkg: Path, dem: Path, truth_dem: Path, out_folder: Path):
     limit_sample = dem_processor.sample([_2019_polygon.boundary], epsg=EPSG)
     interpolation = multilevel_b_spline(
         pd.concat([estimations_agg, limit_sample], ignore_index=True)[['Z', 'geometry']],
-        dem_processor,
+        dem_processor.size_x,
         elevation_field='Z'
     )
-    gully_cover = DEM(inverse_distance_weighted(limit_sample, power=1, elevation_field='Z'), epsg=EPSG)
-
+    gully_cover = DEM(
+        inverse_distance_weighted(
+            limit_sample,
+            cell_size=dem_processor.size_x,
+            power=1,
+            elevation_field='Z'
+        ), epsg=EPSG)
+    rasters = align_rasters(
+        [DEM(interpolation, epsg=EPSG), dem_truth_processor, gully_cover],
+        reference_raster=dem_processor
+    )
     evaluate = Evaluate(
-        dem_processor,
-        DEM(interpolation, epsg=EPSG),
-        dem_truth_processor,
-        gully_cover,
+        dem=dem_processor,
+        estimation_dem=DEM.from_raster(next(rasters)),
+        truth_dem=DEM.from_raster(next(rasters)),
+        gully_cover=DEM.from_raster(next(rasters)),
         estimation_surface=_2012_2019_diff
     )
-    print(evaluate.get_masked())
+    # print(evaluate.align_rasters())
+    print()
 
     if DEBUG >= 1:
         import shutil

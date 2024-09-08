@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Sequence
+import typing as t
 from dataclasses import dataclass
 from pathlib import Path
 from functools import cached_property
@@ -12,6 +12,7 @@ import geopandas as gpd
 from qgis.core import (
     QgsField,
     QgsRasterLayer,
+    QgsRectangle,
     QgsCoordinateReferenceSystem,
 )
 from qgis.PyQt.QtCore import QMetaType
@@ -26,7 +27,43 @@ from gully_automation.utils import vector_layers_to_geodataframe
 PathLike = Path | str
 
 
-class DEM:
+class Extent(t.NamedTuple):
+    xmin: float
+    xmax: float
+    ymin: float
+    ymax: float
+    epsg: str
+
+    @staticmethod
+    def from_raster(raster: QgsRasterLayer, epsg: str | None = None):
+        extent = raster.extent()
+        if epsg is None:
+            epsg = raster.crs().geographicCrsAuthId()
+        if not epsg:
+            raise InvalidCoordinateSystem('EPSG code not provided.')
+        return Extent(
+            extent.xMinimum(),
+            extent.xMaximum(),
+            extent.yMinimum(),
+            extent.yMaximum(),
+            epsg
+        )
+
+    def __str__(self):
+        """Makes the object usable as an input to QGIS processing."""
+        return ' '.join([
+            ','.join(str(coord) for coord in self[:4]),
+            f'[EPSG:{self.epsg}]'
+        ])
+
+
+class InvalidCoordinateSystem(Exception):
+    def __init__(self, msg):
+        self.msg = msg
+        super().__init__(self.msg)
+
+
+class Raster:
 
     def __init__(
         self, path: PathLike,
@@ -35,18 +72,26 @@ class DEM:
     ):
         self.path = path
         self.mask = mask
-        self.epsg = epsg
         if not isinstance(self.path, Path):
             self.path = Path(self.path)
             if not self.path.exists():
                 raise FileNotFoundError('DEM file not found.')
+        if not self.qgs.crs().isValid() and epsg is None:
+            raise InvalidCoordinateSystem(
+                f'{self.path} does not have a valid '
+                'coordinate reference system.'
+            )
+        elif epsg is None:
+            self.epsg = self.qgs.crs().geographicCrsAuthId()
+        else:
+            self.epsg = epsg
+        assert self.epsg
+
+    def __str__(self):
+        return self.path.as_posix()
 
     @cached_property
-    def dem_preproc(self) -> Path:
-        return self.hydro_preprocessing()
-
-    @cached_property
-    def dem_masked(self) -> Path:
+    def masked(self) -> Path:
         return self.apply_mask()
 
     @cached_property
@@ -61,6 +106,43 @@ class DEM:
     @cached_property
     def size_y(self) -> float:
         return self.qgs.rasterUnitsPerPixelY()
+
+    @cached_property
+    def extent(self) -> Extent:
+        return Extent.from_raster(self.qgs, epsg=self.epsg)
+
+    def apply_mask(
+        self,
+        mask: shapely.Polygon | shapely.MultiPolygon | None = None
+    ) -> Path:
+        if mask is None:
+            mask = self.mask
+        converter = Converter()
+        assert mask is not None
+        converter.add_polygons([mask])
+        assert self.epsg is not None
+        mask_as_qgs_vector_layer = converter.to_vector_layer(self.epsg)
+        masked_dem = processing.run('sagang:cliprasterwithpolygon', {
+            'INPUT': [self.path.as_posix()],
+            'OUTPUT': 'TEMPORARY_OUTPUT',
+            'POLYGONS': mask_as_qgs_vector_layer,
+            'EXTENT': 1
+        })
+        return Path(masked_dem['OUTPUT'])
+
+
+class DEM(Raster):
+
+    def __init__(
+        self, path: PathLike,
+        mask: shapely.Polygon | shapely.MultiPolygon | None = None,
+        epsg: str | None = None
+    ):
+        super().__init__(path, mask, epsg)
+
+    @cached_property
+    def dem_preproc(self) -> Path:
+        return self.hydro_preprocessing()
 
     def hydro_preprocessing(self) -> Path:
         sink_route = processing.run(
@@ -83,44 +165,13 @@ class DEM:
         )
         return Path(dem_preproc['DEM_PREPROC'])
 
-    def apply_mask(
-        self,
-        mask: shapely.Polygon | shapely.MultiPolygon | None = None
-    ) -> Path:
-        if mask is None:
-            mask = self.mask
-        converter = Converter()
-        assert mask is not None
-        converter.add_polygons([mask])
-        assert self.epsg is not None
-        mask_as_qgs_vector_layer = converter.to_vector_layer(self.epsg)
-        # masked_dem = processing.run(
-        #     'gdal:cliprasterbymasklayer', {
-        #         'INPUT': self.path.as_posix(),
-        #         'MASK': mask_as_qgs_vector_layer,
-        #         'SOURCE_CRS': QgsCoordinateReferenceSystem(f'EPSG:{self.epsg}'),
-        #         'TARGET_CRS': QgsCoordinateReferenceSystem(f'EPSG:{self.epsg}'),
-        #         'TARGET_EXTENT': None,
-        #         'NODATA': None,
-        #         'ALPHA_BAND': False,
-        #         'CROP_TO_CUTLINE': False,
-        #         'KEEP_RESOLUTION': False,
-        #         'SET_RESOLUTION': False,
-        #         'X_RESOLUTION': None,
-        #         'Y_RESOLUTION': None,
-        #         'MULTITHREADING': False,
-        #         'OPTIONS': '',
-        #         'DATA_TYPE': 0,
-        #         'EXTRA': '',
-        #         'OUTPUT': 'TEMPORARY_OUTPUT'}
-        # )
-        masked_dem = processing.run('sagang:cliprasterwithpolygon', {
-            'INPUT': [self.path.as_posix()],
-            'OUTPUT': 'TEMPORARY_OUTPUT',
-            'POLYGONS': mask_as_qgs_vector_layer,
-            'EXTENT': 1
-        })
-        return Path(masked_dem['OUTPUT'])
+    @staticmethod
+    def from_raster(raster: Raster):
+        return DEM(
+            raster.path,
+            raster.mask,
+            raster.epsg
+        )
 
     def sample(
         self,
@@ -143,7 +194,7 @@ class DEM:
 
     def line_profiles(
         self,
-        points: Sequence[shapely.Point],
+        points: t.Sequence[shapely.Point],
         epsg: str = '3844',
         out_file: Path | None = None
     ) -> gpd.GeoSeries:
@@ -238,22 +289,22 @@ class DEM:
 
 def multilevel_b_spline(
     points: gpd.GeoDataFrame,
-    dem: DEM,
+    cell_size: float,
     elevation_field: str = 'Z'
 ) -> Path:
     converter = Converter()
     converter.add_points(points.geometry)
     converter.add_attribute(
         type_=QMetaType.Double,
-        name='Z',
-        values=points['Z']
+        name=elevation_field,
+        values=points[elevation_field]
     )
     vector_layer = converter.to_vector_layer(epsg=points.crs.to_epsg())
     return Path(processing.run('sagang:multilevelbspline', {
         'SHAPES': vector_layer,
         'FIELD': elevation_field,
         'TARGET_USER_XMIN TARGET_USER_XMAX TARGET_USER_YMIN TARGET_USER_YMAX': None,
-        'TARGET_USER_SIZE': dem.size_x,
+        'TARGET_USER_SIZE': cell_size,
         'TARGET_USER_FITS': 0,
         'TARGET_OUT_GRID': 'TEMPORARY_OUTPUT',
         'METHOD': 0,
@@ -262,7 +313,12 @@ def multilevel_b_spline(
     })['TARGET_OUT_GRID'])
 
 
-def inverse_distance_weighted(points: gpd.GeoDataFrame, power: int = 1, elevation_field: str = 'Z'):
+def inverse_distance_weighted(
+    points: gpd.GeoDataFrame,
+    cell_size: float,
+    power: int = 1,
+    elevation_field: str = 'Z'
+):
     if 'Z' not in points:
         raise NotImplementedError(
             'Input geodataframe should have a Z column.'
@@ -271,19 +327,19 @@ def inverse_distance_weighted(points: gpd.GeoDataFrame, power: int = 1, elevatio
     converter.add_points(points.geometry)
     converter.add_attribute(
         type_=QMetaType.Double,
-        name='Z',
-        values=points['Z']
+        name=elevation_field,
+        values=points[elevation_field]
     )
     vector_layer = converter.to_vector_layer(epsg=points.crs.to_epsg())
     return Path(processing.run('sagang:inversedistanceweightedinterpolation', {
         'POINTS': vector_layer,
-        'FIELD': 'Z',
+        'FIELD': elevation_field,
         'CV_METHOD': 0,
         'CV_SUMMARY': 'TEMPORARY_OUTPUT',
         'CV_RESIDUALS': 'TEMPORARY_OUTPUT',
         'CV_SAMPLES': 10,
         'TARGET_USER_XMIN TARGET_USER_XMAX TARGET_USER_YMIN TARGET_USER_YMAX': None,
-        'TARGET_USER_SIZE': 0.5,
+        'TARGET_USER_SIZE': cell_size,
         'TARGET_USER_FITS': 0,
         'TARGET_OUT_GRID': 'TEMPORARY_OUTPUT',
         'SEARCH_RANGE': 1,
@@ -308,6 +364,27 @@ class Evaluate:
     def get_masked(self):
         return [dem.apply_mask(self.estimation_surface) for dem in
                 (self.dem, self.estimation_dem, self.truth_dem, self.gully_cover)]
+
+
+def align_rasters(
+    rasters: t.Sequence[Raster],
+    reference_raster: Raster
+) -> t.Generator[Raster, None, None]:
+    extent = str(reference_raster.extent)
+    for i, dem in enumerate(rasters, start=1):
+        if DEBUG >= 1:
+            print(f'Aligned {i} rasters.', end='\r')
+        aligned = processing.run('sagang:resampling', {
+            'INPUT': [dem.path.as_posix()],
+            'OUTPUT': 'TEMPORARY_OUTPUT',
+            'KEEP_TYPE': False,
+            'SCALE_UP': 3,
+            'SCALE_DOWN': 3,
+            'TARGET_USER_XMIN TARGET_USER_XMAX TARGET_USER_YMIN TARGET_USER_YMAX': extent,
+            'TARGET_USER_SIZE': dem.size_x,
+            'TARGET_USER_FITS': 0
+        })
+        yield Raster(aligned['OUTPUT'], epsg=reference_raster.epsg)
 
 
 if __name__ == '__main__':

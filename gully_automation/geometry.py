@@ -32,7 +32,7 @@ from gully_automation.changepoint import estimate_gully, find_changepoints
 from gully_automation.converter import Converter
 
 if t.TYPE_CHECKING:
-    from gully_automation.dem import DEM
+    from gully_automation.raster import DEM
 
 
 def intersects(g1, g2) -> bool:
