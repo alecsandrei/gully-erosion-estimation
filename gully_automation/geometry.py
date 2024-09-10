@@ -348,7 +348,7 @@ def is_contiguous(
 
 def get_centerline(geoms: shapely.Polygon, crs) -> gpd.GeoSeries:
     return gpd.GeoSeries(
-        centerline.geometry.Centerline(geoms).geometry,
+        centerline.geometry.Centerline(geoms, interpolation_distance=0.5).geometry,
         crs=crs
     )  # type: ignore
 
@@ -617,7 +617,7 @@ def map_centerlines_and_profiles(
 def aggregate_overlapping_points(
     points: gpd.GeoDataFrame,
     value_field: str,
-    method: t.Literal['min', 'max', 'mean', 'median'] = 'min'
+    method: t.Literal['min', 'max', 'mean', 'median'] = 'max'
 ):
     df = (
         points[[value_field, points.active_geometry_name]]

@@ -6,7 +6,7 @@ import typing as t
 from dataclasses import dataclass
 from pathlib import Path
 from functools import cached_property
-import time
+import itertools
 
 import geopandas as gpd
 from qgis.core import (
@@ -14,6 +14,7 @@ from qgis.core import (
     QgsRasterLayer,
     QgsRectangle,
     QgsCoordinateReferenceSystem,
+    QgsProcessingFeedback,
 )
 from qgis.PyQt.QtCore import QMetaType
 import shapely.geometry
@@ -90,8 +91,11 @@ class Raster:
     def __str__(self):
         return self.path.as_posix()
 
+    def __sub__(self, other: Raster) -> Raster:
+        return raster_difference(self, other)
+
     @cached_property
-    def masked(self) -> Path:
+    def masked(self) -> Raster:
         return self.apply_mask()
 
     @cached_property
@@ -111,14 +115,17 @@ class Raster:
     def extent(self) -> Extent:
         return Extent.from_raster(self.qgs, epsg=self.epsg)
 
+
+
     def apply_mask(
         self,
         mask: shapely.Polygon | shapely.MultiPolygon | None = None
-    ) -> Path:
+    ) -> Raster:
         if mask is None:
             mask = self.mask
         converter = Converter()
         assert mask is not None
+        mask = mask.buffer(distance=-self.size_x)
         converter.add_polygons([mask])
         assert self.epsg is not None
         mask_as_qgs_vector_layer = converter.to_vector_layer(self.epsg)
@@ -128,7 +135,9 @@ class Raster:
             'POLYGONS': mask_as_qgs_vector_layer,
             'EXTENT': 1
         })
-        return Path(masked_dem['OUTPUT'])
+        return Raster(
+            Path(masked_dem['OUTPUT']), mask=mask, epsg=self.epsg
+        )
 
 
 class DEM(Raster):
@@ -270,7 +279,7 @@ class DEM(Raster):
         )
         profiles_geoms: gpd.GeoSeries = profiles_gdf.geometry  # type: ignore
         # Check profiles that would fall outside of mask
-        # (user defined the wrong boundary).
+        # (happens when the user defined the wrong boundary for the gully).
         orphaned = profiles_geoms.apply(lambda profile: is_orphaned(
             profile, profiles_geoms
         ))
@@ -291,7 +300,7 @@ def multilevel_b_spline(
     points: gpd.GeoDataFrame,
     cell_size: float,
     elevation_field: str = 'Z'
-) -> Path:
+) -> Raster:
     converter = Converter()
     converter.add_points(points.geometry)
     converter.add_attribute(
@@ -300,7 +309,7 @@ def multilevel_b_spline(
         values=points[elevation_field]
     )
     vector_layer = converter.to_vector_layer(epsg=points.crs.to_epsg())
-    return Path(processing.run('sagang:multilevelbspline', {
+    return Raster(processing.run('sagang:multilevelbspline', {
         'SHAPES': vector_layer,
         'FIELD': elevation_field,
         'TARGET_USER_XMIN TARGET_USER_XMAX TARGET_USER_YMIN TARGET_USER_YMAX': None,
@@ -316,9 +325,14 @@ def multilevel_b_spline(
 def inverse_distance_weighted(
     points: gpd.GeoDataFrame,
     cell_size: float,
-    power: int = 1,
-    elevation_field: str = 'Z'
-):
+    power: int = 2,
+    elevation_field: str = 'Z',
+    weighting_method: t.Literal['exponential', 'inverse distance'] = 'inverse distance'
+) -> Raster:
+    dw_weighting = {
+        'inverse distance': 1,
+        'exponential': 2
+    }
     if 'Z' not in points:
         raise NotImplementedError(
             'Input geodataframe should have a Z column.'
@@ -331,7 +345,7 @@ def inverse_distance_weighted(
         values=points[elevation_field]
     )
     vector_layer = converter.to_vector_layer(epsg=points.crs.to_epsg())
-    return Path(processing.run('sagang:inversedistanceweightedinterpolation', {
+    return Raster(processing.run('sagang:inversedistanceweightedinterpolation', {
         'POINTS': vector_layer,
         'FIELD': elevation_field,
         'CV_METHOD': 0,
@@ -347,23 +361,55 @@ def inverse_distance_weighted(
         'SEARCH_POINTS_ALL': 1,
         'SEARCH_POINTS_MIN': 1,
         'SEARCH_POINTS_MAX': 20,
-        'DW_WEIGHTING': 1,
+        'DW_WEIGHTING': dw_weighting[weighting_method],
         'DW_IDW_POWER': power,
         'DW_BANDWIDTH': 1
     })['TARGET_OUT_GRID'])
 
 
 @dataclass
-class Evaluate:
+class Evaluator:
     dem: DEM
     estimation_dem: DEM
     truth_dem: DEM
     gully_cover: DEM
     estimation_surface: shapely.Polygon
 
-    def get_masked(self):
-        return [dem.apply_mask(self.estimation_surface) for dem in
+    def get_masked(self) -> list[DEM]:
+        return [DEM.from_raster(dem.apply_mask(self.estimation_surface)) for dem in
                 (self.dem, self.estimation_dem, self.truth_dem, self.gully_cover)]
+
+    def evaluate(self):
+        gully_cover_volume = raster_volume(self.gully_cover)
+        truth_volume = gully_cover_volume - raster_volume(self.truth_dem)
+        estimation_volume = gully_cover_volume - raster_volume(self.estimation_dem)
+        print(f'Estimation: {estimation_volume} Truth: {truth_volume} Error: {abs(truth_volume - estimation_volume) * 100 / truth_volume}%')
+
+
+def raster_volume(raster: Raster) -> Raster:
+    feedback = QgsProcessingFeedback()
+    processing.run('sagang:rastervolume', {
+        'GRID': raster.path.as_posix(),
+        'METHOD': 0,
+        'LEVEL': 3
+    }, feedback=feedback)
+
+    log = feedback.textLog().splitlines()
+
+    def is_result_line(string):
+        return 'Volume:' in string
+
+    return float(next(filter(is_result_line, log)).split(': ')[-1])
+
+
+def raster_difference(a: Raster, b: Raster) -> Raster:
+    return Raster(
+        processing.run('sagang:rasterdifference', {
+            'A': a.path.as_posix(),
+            'B': b.path.as_posix(),
+            'C':'TEMPORARY_OUTPUT'
+        })['C']
+    )
 
 
 def align_rasters(

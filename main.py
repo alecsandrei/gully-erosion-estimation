@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 import typing as t
+import itertools
 
 import matplotlib.pyplot as plt
 import geopandas as gpd
 import pandas as pd
-from gully_automation import DEBUG, CACHE
+from gully_automation import DEBUG, CACHE, MODEL
 from gully_automation.geometry import (
     get_centerline,
     merge_linestrings,
@@ -17,7 +18,7 @@ from gully_automation.geometry import (
     estimate_gully_beds,
     map_centerlines_and_profiles,
 )
-from gully_automation.raster import DEM, multilevel_b_spline, Evaluate, inverse_distance_weighted, align_rasters
+from gully_automation.raster import DEM, multilevel_b_spline, Evaluator, inverse_distance_weighted, align_rasters
 from gully_automation.changepoint import find_changepoints, plot_changepoints, estimate_gully
 
 
@@ -36,6 +37,7 @@ def debug_profiles(model: Models, profile_samples):
 
 def run(gpkg: Path, dem: Path, truth_dem: Path, out_folder: Path):
     model = gpkg.stem
+    print('Estimating for model', model)
     out_folder = out_folder / model
     if not out_folder.exists():
         out_folder.mkdir()
@@ -63,7 +65,6 @@ def run(gpkg: Path, dem: Path, truth_dem: Path, out_folder: Path):
         pour_points = gpd.read_file(out_folder / f'{model}_pour_points.shp').geometry
         merged_downstream = gpd.read_file(out_folder / f'{model}_merged_downstream.shp').geometry
         profiles_2012 = gpd.read_file(out_folder / f'{model}_profiles_2012.shp').geometry
-        print('read cached features')
     else:
         _2012_centerline = get_centerline(_2012_gdf.geometry[0], _2012_gdf.crs)
         _2012_centerline.to_file(out_folder / f'{model}_2012_centerline.shp')
@@ -140,33 +141,43 @@ def run(gpkg: Path, dem: Path, truth_dem: Path, out_folder: Path):
             plt.show()
 
     estimations = estimate_gully_beds(gully_beds, dem_processor, EPSG)
-    estimations_agg = t.cast(gpd.GeoDataFrame, aggregate_overlapping_points(estimations, 'Z', 'min'))
+    estimations_agg = t.cast(gpd.GeoDataFrame, aggregate_overlapping_points(estimations, 'Z', 'mean'))
     limit_sample = dem_processor.sample([_2019_polygon.boundary], epsg=EPSG)
-    interpolation = multilevel_b_spline(
-        pd.concat([estimations_agg, limit_sample], ignore_index=True)[['Z', 'geometry']],
-        dem_processor.size_x,
-        elevation_field='Z'
-    )
-    gully_cover = DEM(
+    interpolation = DEM.from_raster(
+        multilevel_b_spline(
+            pd.concat([estimations_agg, limit_sample], ignore_index=True)[['Z', 'geometry']],
+            dem_processor.size_x,
+            elevation_field='Z'
+        ))
+    # interpolation = DEM.from_raster(
+    #     inverse_distance_weighted(
+    #         pd.concat([estimations_agg, limit_sample], ignore_index=True)[['Z', 'geometry']],
+    #         cell_size=dem_processor.size_x,
+    #         power=2,
+    #         elevation_field='Z',
+    #         weighting_method='exponential'
+    #     )
+    # )
+    gully_cover = DEM.from_raster(
         inverse_distance_weighted(
             limit_sample,
             cell_size=dem_processor.size_x,
-            power=1,
+            power=2,
             elevation_field='Z'
-        ), epsg=EPSG)
-    rasters = align_rasters(
-        [DEM(interpolation, epsg=EPSG), dem_truth_processor, gully_cover],
+        ))
+    dems = align_rasters(
+        [dem_processor, interpolation, dem_truth_processor, gully_cover],
         reference_raster=dem_processor
     )
-    evaluate = Evaluate(
-        dem=dem_processor,
-        estimation_dem=DEM.from_raster(next(rasters)),
-        truth_dem=DEM.from_raster(next(rasters)),
-        gully_cover=DEM.from_raster(next(rasters)),
+    masked_dems = [
+        DEM.from_raster(dem.apply_mask(_2012_2019_diff)) for dem in dems
+    ]
+    evaluator = Evaluator(
+        *masked_dems,
         estimation_surface=_2012_2019_diff
-    )
-    # print(evaluate.align_rasters())
-    print()
+    )  # type: ignore
+    evaluator.evaluate()
+    # breakpoint()
 
     if DEBUG >= 1:
         import shutil
@@ -179,7 +190,7 @@ def run(gpkg: Path, dem: Path, truth_dem: Path, out_folder: Path):
                 file.unlink()
             (out_folder / 'interpolation').rmdir()
         interpolation_folder = Path(shutil.move(
-            Path(interpolation).parent,
+            interpolation.path.parent,
             out_folder.resolve()
         ))
         interpolation_folder.rename(
@@ -191,7 +202,7 @@ def run(gpkg: Path, dem: Path, truth_dem: Path, out_folder: Path):
                 file.unlink()
             (out_folder / 'cover').rmdir()
         interpolation_folder = Path(shutil.move(
-            gully_cover.dem.parent,
+            gully_cover.path.parent,
             out_folder.resolve()
         ))
         interpolation_folder.rename(
@@ -209,7 +220,7 @@ Models = t.Literal[
     'saveni_amonte'
 ]
 
-MODELS = ['soldanesti_aval', 'soldanesti_amonte', 'saveni_aval', 'saveni_amonte']
+MODELS = ['soldanesti_aval', 'saveni_amonte', 'saveni_aval', 'soldanesti_amonte']
 
 
 def main(model: Models):
@@ -221,5 +232,8 @@ def main(model: Models):
 
 
 if __name__ == '__main__':
-    for model in MODELS[::-1]:
-        main(model=model)
+    if MODEL is not None:
+        main(model=MODEL)
+    else:
+        for model in MODELS[::-1]:
+            main(model=model)
