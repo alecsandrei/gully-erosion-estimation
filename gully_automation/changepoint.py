@@ -7,25 +7,30 @@ import numpy as np
 import ruptures as rpt
 import geopandas as gpd
 
+from gully_automation import DEBUG
+
 
 def find_changepoints(values: np.ndarray):
     algorithm = rpt.Pelt(model='rbf').fit(values)
-    return algorithm.predict(pen=5)
+    return algorithm.predict(pen=25)
 
 
-def plot_changepoints(values: np.ndarray, changepoints: Sequence[int], out_file: Path):
+def plot_changepoints(
+    values: np.ndarray,
+    changepoints: Sequence[int],
+    out_file: Path
+):
     import matplotlib.pyplot as plt
 
-    for changepoint in changepoints:
-        _, ax = plt.subplots(figsize=(12, 5))
+    _, ax = plt.subplots(figsize=(12, 5))
 
-        ax.plot(values)
-        plt.xticks(np.arange(0, values.shape[0], 5))
-        for change_point in changepoints:
-            ax.axvline(change_point, color='b', ls='--', linewidth=0.4)
-        plt.xticks(rotation=90)
-        plt.savefig(out_file)
-        plt.close()
+    ax.plot(values)
+    plt.xticks(np.arange(0, values.shape[0], 5))
+    for change_point in changepoints:
+        ax.axvline(change_point, color='b', ls='--', linewidth=0.4)
+    plt.xticks(rotation=90)
+    plt.savefig(out_file)
+    plt.close()
 
 
 def estimate_gully(
@@ -35,7 +40,7 @@ def estimate_gully(
 ):
 
     def poly_fit(x, y, d):
-        if x.shape[0] >= d:
+        if x.shape[0] <= d:
             return y
         return np.polynomial.polynomial.Polynomial.fit(x, y, d)(x)
 
@@ -46,7 +51,6 @@ def estimate_gully(
 
     def pad(y1: np.ndarray, y2: np.ndarray):
         y1 = y1.copy()
-        # pad_width = y2.shape[0] - y1.shape[0]
         nans = np.empty(y2.shape[0])
         nans[:] = np.nan
         return np.concatenate([nans, y1])
@@ -57,7 +61,7 @@ def estimate_gully(
         return min_ + (array - y_min) * (max_ - min_) / (y_max - y_min)
 
     def exponential(y):
-        return 20**y
+        return 5**y
 
     def estimate_nan(y: np.ndarray):
         y = y.copy()
@@ -81,6 +85,7 @@ def estimate_gully(
         x = range(before.shape[0] - estimation.shape[0], before.shape[0])
         ax.plot(x, estimation, c='orange')
         ax.plot(before)
+        plt.axvline(changepoint, c='red')
         plt.ylabel('Altitudine')
         # plt.show()
 
@@ -92,5 +97,6 @@ def estimate_gully(
     padded = pad(no_head, y2)
     with_head = fill_polyfit(padded, y1_poly, y2)
     estimation = estimate_nan(with_head)
-    # debug_estimation(y1, estimation)
+    if DEBUG >= 1:
+        debug_estimation(y1, estimation)
     return estimation

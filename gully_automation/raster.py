@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import typing as t
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,15 +18,25 @@ from qgis.core import (
     QgsProcessingFeedback,
 )
 from qgis.PyQt.QtCore import QMetaType
-import shapely.geometry
+from shapely import (
+    Polygon,
+    LineString,
+    MultiPolygon,
+    Point
+)
+import processing
 
+from gully_automation import (
+    DEBUG,
+    EPS
+)
 from gully_automation.geometry import is_orphaned
 from gully_automation.converter import Converter
-from gully_automation import processing, DEBUG
 from gully_automation.utils import vector_layers_to_geodataframe
 
 
 PathLike = Path | str
+AnyPolygon = Polygon | MultiPolygon
 
 
 class Extent(t.NamedTuple):
@@ -64,11 +75,14 @@ class InvalidCoordinateSystem(Exception):
         super().__init__(self.msg)
 
 
+T = t.TypeVar('T', bound='Raster')
+
+
 class Raster:
 
     def __init__(
         self, path: PathLike,
-        mask: shapely.Polygon | shapely.MultiPolygon | None = None,
+        mask: Polygon | MultiPolygon | None = None,
         epsg: str | None = None
     ):
         self.path = path
@@ -89,13 +103,13 @@ class Raster:
         assert self.epsg
 
     def __str__(self):
-        return self.path.as_posix()
+        return os.fspath(self.path)
 
     def __sub__(self, other: Raster) -> Raster:
         return raster_difference(self, other)
 
     @cached_property
-    def masked(self) -> Raster:
+    def masked(self):
         return self.apply_mask()
 
     @cached_property
@@ -115,28 +129,26 @@ class Raster:
     def extent(self) -> Extent:
         return Extent.from_raster(self.qgs, epsg=self.epsg)
 
-
-
     def apply_mask(
-        self,
-        mask: shapely.Polygon | shapely.MultiPolygon | None = None
-    ) -> Raster:
+        self: T,
+        mask: Polygon | MultiPolygon | None = None
+    ) -> T:
         if mask is None:
             mask = self.mask
         converter = Converter()
         assert mask is not None
-        mask = mask.buffer(distance=-self.size_x)
+        mask = mask.buffer(distance=self.size_x)
         converter.add_polygons([mask])
         assert self.epsg is not None
         mask_as_qgs_vector_layer = converter.to_vector_layer(self.epsg)
-        masked_dem = processing.run('sagang:cliprasterwithpolygon', {
-            'INPUT': [self.path.as_posix()],
+        masked = processing.run('sagang:cliprasterwithpolygon', {
+            'INPUT': [str(self)],
             'OUTPUT': 'TEMPORARY_OUTPUT',
             'POLYGONS': mask_as_qgs_vector_layer,
             'EXTENT': 1
         })
-        return Raster(
-            Path(masked_dem['OUTPUT']), mask=mask, epsg=self.epsg
+        return type(self)(
+            Path(masked['OUTPUT']), mask=mask, epsg=self.epsg
         )
 
 
@@ -144,19 +156,22 @@ class DEM(Raster):
 
     def __init__(
         self, path: PathLike,
-        mask: shapely.Polygon | shapely.MultiPolygon | None = None,
+        mask: Polygon | MultiPolygon | None = None,
         epsg: str | None = None
     ):
         super().__init__(path, mask, epsg)
 
     @cached_property
-    def dem_preproc(self) -> Path:
+    def dem_preproc(self) -> DEM:
         return self.hydro_preprocessing()
 
-    def hydro_preprocessing(self) -> Path:
+    def hydro_preprocessing(self) -> DEM:
+        dem = self
+        if self.mask is not None:
+            dem = self.masked
         sink_route = processing.run(
             'sagang:sinkdrainageroutedetection', {
-                'ELEVATION': self.path.as_posix(),
+                'ELEVATION': str(dem),
                 'SINKROUTE': 'TEMPORARY_OUTPUT',
                 'THRESHOLD': False,
                 'THRSHEIGHT': 100
@@ -164,7 +179,7 @@ class DEM(Raster):
         )
         dem_preproc = processing.run(
             'sagang:sinkremoval', {
-                'DEM': self.path.as_posix(),
+                'DEM': str(dem),
                 'SINKROUTE': sink_route['SINKROUTE'],
                 'DEM_PREPROC': 'TEMPORARY_OUTPUT',
                 'METHOD': 1,
@@ -172,7 +187,11 @@ class DEM(Raster):
                 'THRSHEIGHT': 100
             }
         )
-        return Path(dem_preproc['DEM_PREPROC'])
+        return DEM(
+            Path(dem_preproc['DEM_PREPROC']),
+            self.mask,
+            epsg=self.epsg
+        )
 
     @staticmethod
     def from_raster(raster: Raster):
@@ -184,14 +203,14 @@ class DEM(Raster):
 
     def sample(
         self,
-        shapes: list[shapely.LineString],
+        shapes: list[LineString],
         epsg: str
     ) -> gpd.GeoDataFrame:
         converter = Converter()
         converter.add_lines(shapes)
 
         profiles = processing.run('sagang:profilesfromlines', {
-            'DEM': self.dem_preproc.as_posix(),
+            'DEM': str(self.dem_preproc),
             'VALUES': None,
             'LINES': converter.to_vector_layer(epsg),
             'NAME': 'FID',
@@ -203,7 +222,7 @@ class DEM(Raster):
 
     def line_profiles(
         self,
-        points: t.Sequence[shapely.Point],
+        points: t.Sequence[Point],
         epsg: str = '3844',
         out_file: Path | None = None
     ) -> gpd.GeoSeries:
@@ -242,7 +261,7 @@ class DEM(Raster):
 
         def snap_pour_point_to_closest_grid_cell() -> str:
             grid_points = processing.run('native:pixelstopoints', {
-                'INPUT_RASTER': self.dem_preproc.as_posix(),
+                'INPUT_RASTER': str(self.dem_preproc),
                 'RASTER_BAND': 1,
                 'FIELD_NAME': 'VALUE',
                 'OUTPUT': 'TEMPORARY_OUTPUT'})
@@ -258,14 +277,16 @@ class DEM(Raster):
         def get_flow_path_profiles():
             # NOTE: this tool will not create a point
             # on the corresponding starting point
+            if DEBUG >= 1:
+                print('Generating flow path profiles from points.')
+            snapped_points = snap_pour_point_to_closest_grid_cell()
             profiles = processing.run(
                 'sagang:leastcostpaths', {
-                    'SOURCE': snap_pour_point_to_closest_grid_cell(),
-                    'DEM': self.dem_preproc.as_posix(),
+                    'SOURCE': snapped_points,
+                    'DEM': str(self.dem_preproc),
                     'VALUES': None,
                     'POINTS': 'TEMPORARY_OUTPUT',
                     'LINE': 'TEMPORARY_OUTPUT'})
-
             return list(Path(profiles['LINE']).parent.glob('*.shp'))
 
         profiles = get_flow_path_profiles()  # type: ignore
@@ -288,12 +309,10 @@ class DEM(Raster):
             f'Found {profiles_orphaned.shape[0]} profiles which '
             'would fall outside of the defined boundary'
         )
-        profiles_valid: gpd.GeoSeries = profiles_geoms[
-            ~orphaned
-        ]  # type: ignore
+        profiles_valid = profiles_geoms[~orphaned]  # type: ignore
         if out_file:
             profiles_valid.to_file(out_file)
-        return profiles_valid
+        return profiles_valid  # type: ignore
 
 
 def multilevel_b_spline(
@@ -309,17 +328,23 @@ def multilevel_b_spline(
         values=points[elevation_field]
     )
     vector_layer = converter.to_vector_layer(epsg=points.crs.to_epsg())
+    extent_param = (
+        'TARGET_USER_XMIN TARGET_USER_XMAX TARGET_USER_YMIN TARGET_USER_YMAX'
+    )
     return Raster(processing.run('sagang:multilevelbspline', {
         'SHAPES': vector_layer,
         'FIELD': elevation_field,
-        'TARGET_USER_XMIN TARGET_USER_XMAX TARGET_USER_YMIN TARGET_USER_YMAX': None,
+        extent_param: None,
         'TARGET_USER_SIZE': cell_size,
         'TARGET_USER_FITS': 0,
         'TARGET_OUT_GRID': 'TEMPORARY_OUTPUT',
         'METHOD': 0,
-        'EPSILON': 0.0001,
+        'EPSILON': EPS,
         'LEVEL_MAX': 14
     })['TARGET_OUT_GRID'])
+
+
+WeightingMethods = t.Literal['exponential', 'inverse distance']
 
 
 def inverse_distance_weighted(
@@ -327,16 +352,12 @@ def inverse_distance_weighted(
     cell_size: float,
     power: int = 2,
     elevation_field: str = 'Z',
-    weighting_method: t.Literal['exponential', 'inverse distance'] = 'inverse distance'
+    weighting_method: WeightingMethods = 'inverse distance'
 ) -> Raster:
     dw_weighting = {
         'inverse distance': 1,
         'exponential': 2
     }
-    if 'Z' not in points:
-        raise NotImplementedError(
-            'Input geodataframe should have a Z column.'
-        )
     converter = Converter()
     converter.add_points(points.geometry)
     converter.add_attribute(
@@ -345,26 +366,30 @@ def inverse_distance_weighted(
         values=points[elevation_field]
     )
     vector_layer = converter.to_vector_layer(epsg=points.crs.to_epsg())
-    return Raster(processing.run('sagang:inversedistanceweightedinterpolation', {
-        'POINTS': vector_layer,
-        'FIELD': elevation_field,
-        'CV_METHOD': 0,
-        'CV_SUMMARY': 'TEMPORARY_OUTPUT',
-        'CV_RESIDUALS': 'TEMPORARY_OUTPUT',
-        'CV_SAMPLES': 10,
-        'TARGET_USER_XMIN TARGET_USER_XMAX TARGET_USER_YMIN TARGET_USER_YMAX': None,
-        'TARGET_USER_SIZE': cell_size,
-        'TARGET_USER_FITS': 0,
-        'TARGET_OUT_GRID': 'TEMPORARY_OUTPUT',
-        'SEARCH_RANGE': 1,
-        'SEARCH_RADIUS': 1000,
-        'SEARCH_POINTS_ALL': 1,
-        'SEARCH_POINTS_MIN': 1,
-        'SEARCH_POINTS_MAX': 20,
-        'DW_WEIGHTING': dw_weighting[weighting_method],
-        'DW_IDW_POWER': power,
-        'DW_BANDWIDTH': 1
-    })['TARGET_OUT_GRID'])
+    extent_param = (
+        'TARGET_USER_XMIN TARGET_USER_XMAX TARGET_USER_YMIN TARGET_USER_YMAX'
+    )
+    return Raster(
+        processing.run('sagang:inversedistanceweightedinterpolation', {
+            'POINTS': vector_layer,
+            'FIELD': elevation_field,
+            'CV_METHOD': 0,
+            'CV_SUMMARY': 'TEMPORARY_OUTPUT',
+            'CV_RESIDUALS': 'TEMPORARY_OUTPUT',
+            'CV_SAMPLES': 10,
+            extent_param: None,
+            'TARGET_USER_SIZE': cell_size,
+            'TARGET_USER_FITS': 0,
+            'TARGET_OUT_GRID': 'TEMPORARY_OUTPUT',
+            'SEARCH_RANGE': 1,
+            'SEARCH_RADIUS': 1000,
+            'SEARCH_POINTS_ALL': 1,
+            'SEARCH_POINTS_MIN': 1,
+            'SEARCH_POINTS_MAX': 20,
+            'DW_WEIGHTING': dw_weighting[weighting_method],
+            'DW_IDW_POWER': power,
+            'DW_BANDWIDTH': 1
+        })['TARGET_OUT_GRID'])
 
 
 @dataclass
@@ -373,23 +398,34 @@ class Evaluator:
     estimation_dem: DEM
     truth_dem: DEM
     gully_cover: DEM
-    estimation_surface: shapely.Polygon
+    estimation_surface: Polygon
 
     def get_masked(self) -> list[DEM]:
-        return [DEM.from_raster(dem.apply_mask(self.estimation_surface)) for dem in
-                (self.dem, self.estimation_dem, self.truth_dem, self.gully_cover)]
+        return [
+            dem.apply_mask(self.estimation_surface) for dem in
+            (self.dem, self.estimation_dem, self.truth_dem, self.gully_cover)
+        ]
 
     def evaluate(self):
         gully_cover_volume = raster_volume(self.gully_cover)
         truth_volume = gully_cover_volume - raster_volume(self.truth_dem)
-        estimation_volume = gully_cover_volume - raster_volume(self.estimation_dem)
-        print(f'Estimation: {estimation_volume} Truth: {truth_volume} Error: {abs(truth_volume - estimation_volume) * 100 / truth_volume}%')
+        estimation_volume = (
+            gully_cover_volume
+            - raster_volume(self.estimation_dem)
+        )
+        error = abs(truth_volume - estimation_volume) * 100 / truth_volume
+        print(
+            f'Estimation: {estimation_volume}\n'
+            f'Truth: {truth_volume}\n'
+            f'Error: {error:%}'
+        )
 
 
-def raster_volume(raster: Raster) -> Raster:
+def raster_volume(raster: Raster) -> float:
+    # Not sure if this breaks for other versions of qgis/SAGA
     feedback = QgsProcessingFeedback()
     processing.run('sagang:rastervolume', {
-        'GRID': raster.path.as_posix(),
+        'GRID': str(raster),
         'METHOD': 0,
         'LEVEL': 3
     }, feedback=feedback)
@@ -405,9 +441,9 @@ def raster_volume(raster: Raster) -> Raster:
 def raster_difference(a: Raster, b: Raster) -> Raster:
     return Raster(
         processing.run('sagang:rasterdifference', {
-            'A': a.path.as_posix(),
-            'B': b.path.as_posix(),
-            'C':'TEMPORARY_OUTPUT'
+            'A': str(a),
+            'B': str(b),
+            'C': 'TEMPORARY_OUTPUT'
         })['C']
     )
 
@@ -421,7 +457,7 @@ def align_rasters(
         if DEBUG >= 1:
             print(f'Aligned {i} rasters.', end='\r')
         aligned = processing.run('sagang:resampling', {
-            'INPUT': [dem.path.as_posix()],
+            'INPUT': [str(dem.path)],
             'OUTPUT': 'TEMPORARY_OUTPUT',
             'KEEP_TYPE': False,
             'SCALE_UP': 3,
@@ -431,8 +467,3 @@ def align_rasters(
             'TARGET_USER_FITS': 0
         })
         yield Raster(aligned['OUTPUT'], epsg=reference_raster.epsg)
-
-
-if __name__ == '__main__':
-
-    print(DEM('/media/alex/alex/gullies/saveni_aval_2012_mbs.asc').hydro_preprocessing())

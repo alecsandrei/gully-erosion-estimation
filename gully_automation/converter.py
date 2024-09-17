@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Sequence, TypedDict
+import typing as t
+import collections.abc as c
 from collections import UserList
 import itertools
 
@@ -18,9 +19,16 @@ from qgis.core import (
 )
 from qgis.core import QgsField
 from qgis.PyQt.QtCore import QMetaType
-import shapely.geometry
+from shapely import (
+    Point,
+    LineString,
+    MultiLineString,
+    Polygon,
+    MultiPolygon
+)
 
 from gully_automation import DEBUG
+
 
 class InvalidGeometry(Exception):
     def __init__(self, geometry: QgsAbstractGeometry):
@@ -36,18 +44,18 @@ class EmptyGeometry(Exception):
 
 class Geoms(UserList[QgsAbstractGeometry]):
 
-    def append(self, geom: QgsAbstractGeometry):
-        if not geom.isValid():
-            raise InvalidGeometry(geom)
-        elif geom.isEmpty():
-            raise EmptyGeometry(geom)
-        super().append(geom)
+    def append(self, item: QgsAbstractGeometry):
+        if not item.isValid():
+            raise InvalidGeometry(item)
+        elif item.isEmpty():
+            raise EmptyGeometry(item)
+        super().append(item)
 
 
-class Attribute(TypedDict):
+class Attribute(t.TypedDict):
     name: str
     type_: QMetaType
-    values: Sequence
+    values: c.Sequence
 
 
 class Converter:
@@ -59,7 +67,7 @@ class Converter:
 
     def add_points(
         self,
-        points: Sequence[shapely.Point]
+        points: c.Sequence[Point]
     ):
         for point in points:
             if point.has_z:
@@ -70,20 +78,18 @@ class Converter:
 
     def add_lines(
         self,
-        lines: (
-            Sequence[shapely.LineString | shapely.MultiLineString]
-        )
+        lines: c.Sequence[LineString | MultiLineString]
     ):
         for line in lines:
             wkt = line.wkt
-            if isinstance(line, shapely.LineString):
+            if isinstance(line, LineString):
                 qgs_line = QgsLineString()
                 if not qgs_line.fromWkt(wkt):
                     raise Exception(
                         f'Failed to convert {line!r}..'
                     )
                 self.geoms.append(qgs_line)
-            elif isinstance(line, shapely.MultiLineString):
+            elif isinstance(line, MultiLineString):
                 qgs_multilinestring = QgsMultiLineString()
                 if not qgs_multilinestring.fromWkt(wkt):
                     raise Exception(
@@ -95,18 +101,18 @@ class Converter:
 
     def add_polygons(
         self,
-        polygons: Sequence[shapely.Polygon | shapely.MultiPolygon]
+        polygons: c.Sequence[Polygon | MultiPolygon]
     ):
         for polygon in polygons:
             wkt = polygon.wkt
-            if isinstance(polygon, shapely.Polygon):
+            if isinstance(polygon, Polygon):
                 qgs_polygon = QgsPolygon()
                 if not qgs_polygon.fromWkt(wkt):
                     raise Exception(
                         f'Failed to convert {polygon!r} to QgsPolygon.'
                     )
                 self.geoms.append(qgs_polygon)
-            elif isinstance(polygon, shapely.MultiPolygon):
+            elif isinstance(polygon, MultiPolygon):
                 qgs_multipolygon = QgsMultiPolygon()
                 if not qgs_multipolygon.fromWkt(wkt):
                     raise Exception(
@@ -117,7 +123,7 @@ class Converter:
                 raise Exception(f'{polygon!r} not allowed as input')
 
     def add_attribute(
-        self, type_: QMetaType, name: str, values: Sequence
+        self, type_: QMetaType, name: str, values: c.Sequence
     ):
         self.attributes.append(
             {'name': name,
@@ -128,7 +134,8 @@ class Converter:
     def to_vector_layer(self, epsg: str):
         for attribute in self.attributes:
             if (
-                (len1 := len(attribute['values'])) and len1 != (len2 := len(self.geoms))
+                (len1 := len(attribute['values'])) and len1 != (
+                    len2 := len(self.geoms))
             ):
                 raise Exception(
                     f'Shape mismatch between attributes and geometries: {len1} {len2}.'
@@ -155,7 +162,7 @@ class Converter:
                     ]
                 )
             if DEBUG >= 1:
-                print(f'UPDATING FIELDS FOR {type(layer)}.')
+                print(f'Updating the fields of layer {layer.id()}.')
             layer.updateFields()
         layer.startEditing()
         features = []

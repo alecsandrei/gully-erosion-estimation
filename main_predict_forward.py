@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 import typing as t
-import itertools
+import concurrent.futures
 
 import matplotlib.pyplot as plt
 import geopandas as gpd
 import pandas as pd
-from gully_automation import DEBUG, CACHE, MODEL
+from gully_automation import DEBUG, CACHE, MODEL, EVAL
 from gully_automation.geometry import (
     get_centerline,
     merge_linestrings,
@@ -17,9 +17,10 @@ from gully_automation.geometry import (
     aggregate_overlapping_points,
     estimate_gully_beds,
     map_centerlines_and_profiles,
+    extend_line_to_geom
 )
 from gully_automation.raster import DEM, multilevel_b_spline, Evaluator, inverse_distance_weighted, align_rasters
-from gully_automation.changepoint import find_changepoints, plot_changepoints, estimate_gully
+from gully_automation.changepoint import find_changepoints, plot_changepoints
 
 
 def debug_profiles(model: Models, profile_samples):
@@ -51,8 +52,7 @@ def run(gpkg: Path, dem: Path, truth_dem: Path, out_folder: Path):
     _2012_polygon = _2012_gdf.geometry[0]
     _2019_polygon = _2019_gdf.geometry[0]
     _2012_2019_diff = _2019_polygon.difference(_2012_polygon)
-    dem_processor = DEM(dem, mask=_2012_polygon,
-                        epsg=EPSG)
+    dem_processor = DEM(dem, epsg=EPSG)
     dem_truth_processor = DEM(truth_dem, epsg=EPSG)
     if CACHE:
         _2012_centerline_types = CenterlineTypes.from_linestrings(
@@ -65,6 +65,8 @@ def run(gpkg: Path, dem: Path, truth_dem: Path, out_folder: Path):
         pour_points = gpd.read_file(out_folder / f'{model}_pour_points.shp').geometry
         merged_downstream = gpd.read_file(out_folder / f'{model}_merged_downstream.shp').geometry
         profiles_2012 = gpd.read_file(out_folder / f'{model}_profiles_2012.shp').geometry
+        # profile_sample = gpd.read_file(out_folder / f'{model}_profile_samples.shp')
+        # centerline_sample = gpd.read_file(out_folder / f'{model}_centerline_samples.shp')
     else:
         _2012_centerline = get_centerline(_2012_gdf.geometry[0], _2012_gdf.crs)
         _2012_centerline.to_file(out_folder / f'{model}_2012_centerline.shp')
@@ -96,7 +98,6 @@ def run(gpkg: Path, dem: Path, truth_dem: Path, out_folder: Path):
             pour_points,
             out_file=out_folder / f'{model}_profiles_2012.shp'
         ).geometry
-
     gully_bed = map_centerlines_and_profiles(
         merged_downstream,
         profiles_2012,
@@ -104,11 +105,25 @@ def run(gpkg: Path, dem: Path, truth_dem: Path, out_folder: Path):
         dem_processor.size_x
     )
     gully_beds = list(gully_bed)
+    centerlines_snapped = [
+        extend_line_to_geom(gully_bed.centerline, _2019_polygon)
+        for gully_bed in gully_beds
+    ]
+    profiles_snapped = [
+        extend_line_to_geom(gully_bed.profile, _2019_polygon)
+        for gully_bed in gully_beds
+    ]
     centerline_sample = dem_processor.sample(
-        [gully_bed.centerline for gully_bed in gully_beds], EPSG
+        centerlines_snapped, EPSG
+    )
+    centerline_sample.to_file(
+        out_folder / f'{model}_centerline_samples.shp'
     )
     profile_sample = dem_processor.sample(
-        [gully_bed.profile for gully_bed in gully_beds], EPSG
+        profiles_snapped, EPSG
+    )
+    profile_sample.to_file(
+        out_folder / f'{model}_profile_samples.shp'
     )
 
     def debug_profiles():
@@ -124,24 +139,19 @@ def run(gpkg: Path, dem: Path, truth_dem: Path, out_folder: Path):
             plt.savefig(profiles_dir / f'{id_}.png')
             plt.close()
 
-    def debug_estimations():
-        estimations = out_folder / 'estimation'
-        estimations.mkdir(exist_ok=True)
+    profile_out_dir = None
+    if DEBUG >= 1:
+        profile_out_dir = out_folder / 'estimation'
+        profile_out_dir.mkdir(exist_ok=True)
 
-        for id_ in profile_sample['ID_LINE'].unique():
-            profile: pd.Series = profile_sample.loc[profile_sample['ID_LINE'] == id_, 'Z']
-            centerline: pd.Series = centerline_sample.loc[centerline_sample['ID_LINE'] == id_, 'Z']
-            estimate_gully(
-                profile.values,
-                centerline.values,
-                find_changepoints(profile.values)[0],
-            )
-            plt.savefig((estimations / f'{id_}.png'))
-            plt.close()
-            plt.show()
-
-    estimations = estimate_gully_beds(gully_beds, dem_processor, EPSG)
-    estimations_agg = t.cast(gpd.GeoDataFrame, aggregate_overlapping_points(estimations, 'Z', 'mean'))
+    estimations, changepoints = estimate_gully_beds(
+        gully_beds,
+        dem_processor,
+        EPSG,
+        profile_out_dir=profile_out_dir
+    )
+    gpd.GeoSeries(changepoints).to_file(out_folder / f'{model}_changepoints.shp')
+    estimations_agg = t.cast(gpd.GeoDataFrame, aggregate_overlapping_points(estimations, 'Z', 'min'))
     limit_sample = dem_processor.sample([_2019_polygon.boundary], epsg=EPSG)
     interpolation = DEM.from_raster(
         multilevel_b_spline(
@@ -149,15 +159,6 @@ def run(gpkg: Path, dem: Path, truth_dem: Path, out_folder: Path):
             dem_processor.size_x,
             elevation_field='Z'
         ))
-    # interpolation = DEM.from_raster(
-    #     inverse_distance_weighted(
-    #         pd.concat([estimations_agg, limit_sample], ignore_index=True)[['Z', 'geometry']],
-    #         cell_size=dem_processor.size_x,
-    #         power=2,
-    #         elevation_field='Z',
-    #         weighting_method='exponential'
-    #     )
-    # )
     gully_cover = DEM.from_raster(
         inverse_distance_weighted(
             limit_sample,
@@ -169,15 +170,18 @@ def run(gpkg: Path, dem: Path, truth_dem: Path, out_folder: Path):
         [dem_processor, interpolation, dem_truth_processor, gully_cover],
         reference_raster=dem_processor
     )
+
+    estimation_surface = _2012_2019_diff
     masked_dems = [
-        DEM.from_raster(dem.apply_mask(_2012_2019_diff)) for dem in dems
+        DEM.from_raster(dem.apply_mask(estimation_surface)) for dem in dems
     ]
-    evaluator = Evaluator(
-        *masked_dems,
-        estimation_surface=_2012_2019_diff
-    )  # type: ignore
-    evaluator.evaluate()
-    # breakpoint()
+    if EVAL:
+        evaluator = Evaluator(
+            *masked_dems,
+            estimation_surface=estimation_surface
+        )
+        evaluator.evaluate()
+        print('Estimated for', model)
 
     if DEBUG >= 1:
         import shutil
@@ -220,7 +224,9 @@ Models = t.Literal[
     'saveni_amonte'
 ]
 
-MODELS = ['soldanesti_aval', 'saveni_amonte', 'saveni_aval', 'soldanesti_amonte']
+MODELS = [
+    'soldanesti_aval', 'saveni_amonte', 'saveni_aval', 'soldanesti_amonte'
+]
 
 
 def main(model: Models):
@@ -235,5 +241,7 @@ if __name__ == '__main__':
     if MODEL is not None:
         main(model=MODEL)
     else:
+        # with concurrent.futures.ProcessPoolExecutor(max_workers=4) as executor:
+        #     executor.map(main, MODELS)
         for model in MODELS[::-1]:
             main(model=model)
