@@ -6,7 +6,7 @@ import typing as t
 import geopandas as gpd
 import pandas as pd
 
-from gully_automation import DEBUG
+from gully_erosion_estimation import DEBUG
 
 if t.TYPE_CHECKING:
     from qgis.core import QgsVectorLayer

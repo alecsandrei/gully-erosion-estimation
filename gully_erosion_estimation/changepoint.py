@@ -7,7 +7,7 @@ import numpy as np
 import ruptures as rpt
 import geopandas as gpd
 
-from gully_automation import DEBUG
+from gully_erosion_estimation import DEBUG
 
 
 def find_changepoints(values: np.ndarray):

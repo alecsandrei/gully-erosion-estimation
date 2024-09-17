@@ -8,8 +8,8 @@ import shapely
 import matplotlib.pyplot as plt
 import geopandas as gpd
 import pandas as pd
-from gully_automation import DEBUG, CACHE, MODEL
-from gully_automation.geometry import (
+from gully_erosion_estimation import DEBUG, CACHE, MODEL
+from gully_erosion_estimation.geometry import (
     get_centerline,
     merge_linestrings,
     CenterlineTypes,
@@ -24,8 +24,8 @@ from gully_automation.geometry import (
     extend_line_to_geom,
     Endpoints
 )
-from gully_automation.raster import DEM, multilevel_b_spline, Evaluator, inverse_distance_weighted, align_rasters
-from gully_automation.changepoint import find_changepoints, plot_changepoints
+from gully_erosion_estimation.raster import DEM, multilevel_b_spline, Evaluator, inverse_distance_weighted, align_rasters
+from gully_erosion_estimation.changepoint import find_changepoints, plot_changepoints
 
 
 def run(gpkg: Path, dem: Path, out_folder: Path):

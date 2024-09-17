@@ -27,7 +27,7 @@ from shapely import (
     MultiPolygon
 )
 
-from gully_automation import DEBUG
+from gully_erosion_estimation import DEBUG
 
 
 class InvalidGeometry(Exception):

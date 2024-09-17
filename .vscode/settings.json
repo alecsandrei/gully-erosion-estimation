@@ -1,7 +1,0 @@
-{
-    "python.analysis.typeCheckingMode": "standard",
-    "flake8.args": [
-        "--ignore=W503",
-    ],
-    "python.analysis.autoImportCompletions": false,
-}

@@ -7,8 +7,8 @@ import concurrent.futures
 import matplotlib.pyplot as plt
 import geopandas as gpd
 import pandas as pd
-from gully_automation import DEBUG, CACHE, MODEL, EVAL
-from gully_automation.geometry import (
+from gully_erosion_estimation import DEBUG, CACHE, MODEL, EVAL
+from gully_erosion_estimation.geometry import (
     get_centerline,
     merge_linestrings,
     CenterlineTypes,
@@ -19,8 +19,8 @@ from gully_automation.geometry import (
     map_centerlines_and_profiles,
     extend_line_to_geom
 )
-from gully_automation.raster import DEM, multilevel_b_spline, Evaluator, inverse_distance_weighted, align_rasters
-from gully_automation.changepoint import find_changepoints, plot_changepoints
+from gully_erosion_estimation.raster import DEM, multilevel_b_spline, Evaluator, inverse_distance_weighted, align_rasters
+from gully_erosion_estimation.changepoint import find_changepoints, plot_changepoints
 
 
 def debug_profiles(model: Models, profile_samples):

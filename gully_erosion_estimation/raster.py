@@ -26,13 +26,13 @@ from shapely import (
 )
 import processing
 
-from gully_automation import (
+from gully_erosion_estimation import (
     DEBUG,
     EPS
 )
-from gully_automation.geometry import is_orphaned
-from gully_automation.converter import Converter
-from gully_automation.utils import vector_layers_to_geodataframe
+from gully_erosion_estimation.geometry import is_orphaned
+from gully_erosion_estimation.converter import Converter
+from gully_erosion_estimation.utils import vector_layers_to_geodataframe
 
 
 PathLike = Path | str

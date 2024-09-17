@@ -31,17 +31,17 @@ import geopandas as gpd
 import centerline.geometry
 from qgis.PyQt.QtCore import QMetaType
 
-from gully_automation import (
+from gully_erosion_estimation import (
     EPS,
     DEBUG
 )
-from gully_automation.changepoint import (
+from gully_erosion_estimation.changepoint import (
     estimate_gully,
     find_changepoints
 )
 
 if t.TYPE_CHECKING:
-    from gully_automation.raster import DEM
+    from gully_erosion_estimation.raster import DEM
 
 
 AnyLine: t.TypeAlias = LineString | MultiLineString

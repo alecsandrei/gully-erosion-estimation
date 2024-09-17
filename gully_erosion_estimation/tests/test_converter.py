@@ -1,6 +1,6 @@
 import shapely.geometry
 
-from gully_automation.converter import Converter
+from gully_erosion_estimation.converter import Converter
 
 
 def test_add_point():
