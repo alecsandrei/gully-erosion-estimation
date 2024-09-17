@@ -1,3 +1,5 @@
 centerline
 geopandas
 ruptures
+
+# As of right now, also depends on PyQGIS
