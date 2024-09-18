@@ -7,7 +7,7 @@ import concurrent.futures
 import matplotlib.pyplot as plt
 import geopandas as gpd
 import pandas as pd
-from gully_erosion_estimation import DEBUG, CACHE, MODEL, EVAL, PENALTY
+from gully_erosion_estimation import DEBUG, CACHE, MODEL, EVAL, PENALTY, MULTIPROCESSING
 from gully_erosion_estimation.geometry import (
     get_centerline,
     merge_linestrings,
@@ -89,9 +89,8 @@ def run(gpkg: Path, dem: Path, truth_dem: Path, out_folder: Path):
         profiles = next(results)
         centerlines = next(results)
         centerlines_snapped = next(results)
-        print(f'read cached features{" ":<10}')
+        print('finished reading cached features')
     else:
-        print('Should not reach here')
         _2012_centerline = get_centerline(_2012_gdf.geometry[0], _2012_gdf.crs)
         _2012_centerline.to_file(out_folder / f'{model}_2012_centerline.shp')
         _2012_centerline_types = CenterlineTypes.from_linestrings(
@@ -153,7 +152,7 @@ def run(gpkg: Path, dem: Path, truth_dem: Path, out_folder: Path):
 
     estimations, _ = estimate_gully_beds(
         profiles,
-        centerlines,
+        centerlines_snapped,
         dem_processor,
         EPSG,
         penalty=PENALTY,
@@ -182,7 +181,6 @@ def run(gpkg: Path, dem: Path, truth_dem: Path, out_folder: Path):
          dem_truth_processor, gully_cover],
         reference_raster=dem_processor
     )
-    estimation_surface = _2012_2019_diff
     masked_dems = [
         DEM.from_raster(dem.apply_mask(estimation_surface)) for dem in dems
     ]
@@ -255,7 +253,13 @@ if __name__ == '__main__':
     if MODEL is not None:
         main(model=MODEL)
     else:
-        # with concurrent.futures.ProcessPoolExecutor(max_workers=4) as executor:
-        #     executor.map(main, MODELS)
-        for model in MODELS:
-            main(model=model)
+        if MULTIPROCESSING:
+            with concurrent.futures.ProcessPoolExecutor(
+                max_workers=len(MODELS)
+            ) as executor:
+                results = executor.map(main, MODELS)
+                for result in results:
+                    print(result)
+        else:
+            for model in MODELS:
+                main(model=model)

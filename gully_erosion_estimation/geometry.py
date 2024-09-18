@@ -367,7 +367,7 @@ def is_contiguous(
 def get_centerline(geoms: Polygon, crs) -> gpd.GeoSeries:
     return gpd.GeoSeries(
         centerline.geometry.Centerline(
-            geoms, interpolation_distance=0.25).geometry,
+            geoms, interpolation_distance=0.5).geometry,
         crs=crs
     )  # type: ignore
 
