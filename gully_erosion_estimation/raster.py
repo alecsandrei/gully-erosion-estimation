@@ -413,10 +413,10 @@ class Evaluator:
             gully_cover_volume
             - raster_volume(self.estimation_dem)
         )
-        error = abs(truth_volume - estimation_volume) * 100 / truth_volume
+        error = abs(truth_volume - estimation_volume) / truth_volume
         print(
-            f'Estimation: {estimation_volume}\n'
-            f'Truth: {truth_volume}\n'
+            f'Estimation: {estimation_volume:.3f}\n'
+            f'Truth: {truth_volume:.3f}\n'
             f'Error: {error:%}'
         )
 

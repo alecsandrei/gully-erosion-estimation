@@ -6,6 +6,7 @@ import osgeo.ogr
 
 osgeo.ogr.UseExceptions()
 
+# NOTE: some paths are for now
 
 # Initialize QGIS Application
 # Supply path to qgis install location
@@ -42,6 +43,6 @@ Processing.initialize()
 
 EPS = float(os.getenv('EPSILON', 1e-5))
 DEBUG = int(os.getenv('DEBUG', 0))
-CACHE = int(os.getenv('CACHE', 1))
+CACHE = int(os.getenv('CACHE', 0))
 MODEL = os.getenv('MODEL', None)
 EVAL = os.getenv('EVAL', 0)

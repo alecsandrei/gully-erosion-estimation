@@ -582,7 +582,7 @@ def estimate_gully_beds(
         estimation_profile = pd.concat(
             [centerline.geometry, profile.geometry],
             ignore_index=True
-        )
+        ).to_frame()
         estimation_profile['Z'] = estimation
         estimation_profile[line_id_col] = id_
         return estimation_profile  # type: ignore
