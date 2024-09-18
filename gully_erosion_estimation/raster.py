@@ -148,7 +148,7 @@ class Raster:
             'EXTENT': 1
         })
         return type(self)(
-            Path(masked['OUTPUT']), mask=mask, epsg=self.epsg
+            Path(masked['OUTPUT']), epsg=self.epsg
         )
 
 
@@ -245,7 +245,9 @@ class DEM(Raster):
                 ]
             )
             if DEBUG >= 1:
-                print(f'UPDATING FIELDS FOR {type(layer)}.')
+                print(
+                    f'Adding x y information as field for layer {layer.id()}.'
+                )
             layer.updateFields()
             layer.startEditing()
             for i in range(1, layer.featureCount() + 1):

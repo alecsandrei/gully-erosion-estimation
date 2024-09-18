@@ -49,10 +49,15 @@ def run(gpkg: Path, dem: Path, truth_dem: Path, out_folder: Path):
     _2012_gdf = gpd.read_file(gpkg, layer='2012', engine='fiona')
     EPSG = _2012_gdf.crs.to_epsg()
     _2019_gdf = gpd.read_file(gpkg, layer='2019', engine='fiona')
+    assert _2012_gdf.shape[0] == 1
+    assert _2019_gdf.shape[0] == 1
     _2012_polygon = _2012_gdf.geometry[0]
     _2019_polygon = _2019_gdf.geometry[0]
     _2012_2019_diff = _2019_polygon.difference(_2012_polygon)
-    dem_processor = DEM(dem, epsg=EPSG)
+    estimation_surface = gpd.read_file(
+        gpkg, layer='estimation_surfaces', engine='fiona'
+    ).geometry.union_all().intersection(_2019_polygon)
+    dem_processor = DEM(dem, mask=_2012_polygon, epsg=EPSG)
     dem_truth_processor = DEM(truth_dem, epsg=EPSG)
     if CACHE:
         _2012_centerline_types = CenterlineTypes.from_linestrings(
@@ -171,7 +176,6 @@ def run(gpkg: Path, dem: Path, truth_dem: Path, out_folder: Path):
         reference_raster=dem_processor
     )
 
-    estimation_surface = _2012_2019_diff
     masked_dems = [
         DEM.from_raster(dem.apply_mask(estimation_surface)) for dem in dems
     ]
@@ -182,7 +186,7 @@ def run(gpkg: Path, dem: Path, truth_dem: Path, out_folder: Path):
         )
         evaluator.evaluate()
         print('Estimated for', model)
-
+    breakpoint()
     if DEBUG >= 1:
         import shutil
         limit_sample.to_file(out_folder / 'limit_sample.shp')
@@ -231,7 +235,10 @@ MODELS = [
 
 def main(model: Models):
     dem = Path(f'./data/{model}_2012.tif')
-    dem_truth = Path(f'./data/{model}_2019_mbs.asc')
+    if (path := Path(f'./data/{model}_2019_mbs.asc')).exists():
+        dem_truth = path
+    else:
+        dem_truth = path.with_suffix('.tif')
     gpkg = Path(f'./data/{model}.gpkg')
     out_folder = Path('./data/derived')
     run(gpkg, dem, dem_truth, out_folder)

@@ -12,7 +12,7 @@ from gully_erosion_estimation import DEBUG
 
 def find_changepoints(values: np.ndarray):
     algorithm = rpt.Pelt(model='rbf').fit(values)
-    return algorithm.predict(pen=25)
+    return algorithm.predict(pen=20)
 
 
 def plot_changepoints(
