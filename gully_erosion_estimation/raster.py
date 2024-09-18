@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import collections.abc as c
 import typing as t
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,7 +31,11 @@ from gully_erosion_estimation import (
     DEBUG,
     EPS
 )
-from gully_erosion_estimation.geometry import is_orphaned
+from gully_erosion_estimation.geometry import (
+    within,
+    is_orphaned,
+    intersects
+)
 from gully_erosion_estimation.converter import Converter
 from gully_erosion_estimation.utils import vector_layers_to_geodataframe
 
@@ -151,6 +156,18 @@ class Raster:
             Path(masked['OUTPUT']), epsg=self.epsg
         )
 
+    def gaussian_filter(self: T) -> T:
+        if DEBUG:
+            print(f'Applying a gaussian filter to raster {self}.')
+        return type(self)(
+            processing.run('sagang:gaussianfilter', {
+                'INPUT': str(self),
+                'RESULT': 'TEMPORARY_OUTPUT',
+                'KERNEL_RADIUS': 3,
+                'SIGMA': 50
+            })['RESULT'], epsg=self.epsg
+        )
+
 
 class DEM(Raster):
 
@@ -203,7 +220,7 @@ class DEM(Raster):
 
     def sample(
         self,
-        shapes: list[LineString],
+        shapes: c.Sequence[LineString],
         epsg: str
     ) -> gpd.GeoDataFrame:
         converter = Converter()
@@ -301,16 +318,14 @@ class DEM(Raster):
             profiles  # type: ignore
         )
         profiles_geoms: gpd.GeoSeries = profiles_gdf.geometry  # type: ignore
-        # Check profiles that would fall outside of mask
-        # (happens when the user defined the wrong boundary for the gully).
         orphaned = profiles_geoms.apply(lambda profile: is_orphaned(
             profile, profiles_geoms
         ))
-        profiles_orphaned = profiles_geoms[orphaned]
         print(
-            f'Found {profiles_orphaned.shape[0]} profiles which '
+            f'Found {orphaned.sum()} profiles which '
             'would fall outside of the defined boundary'
         )
+        # profiles_orphaned = profiles_geoms[orphaned]
         profiles_valid = profiles_geoms[~orphaned]  # type: ignore
         if out_file:
             profiles_valid.to_file(out_file)

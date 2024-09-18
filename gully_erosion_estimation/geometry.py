@@ -543,13 +543,13 @@ class GullyBed:
 
 
 def estimate_gully_beds(
-    gully_beds: list[GullyBed],
+    profiles: c.Sequence[LineString],
+    centerlines: c.Sequence[LineString],
     dem: DEM,
     epsg: str,
+    penalty: int,
     profile_out_dir: Path | None = None
 ) -> tuple[gpd.GeoDataFrame, list[Point]]:
-    profiles = [bed.profile for bed in gully_beds]
-    centerlines = [bed.centerline for bed in gully_beds]
     changepoints: list[Point] = []
     profile_sample = dem.sample(profiles, epsg)
     centerline_sample = dem.sample(centerlines, epsg)
@@ -568,14 +568,14 @@ def estimate_gully_beds(
         centerline: gpd.GeoDataFrame = centerline_sample.loc[
             centerline_sample[line_id_col] == id_
         ]
-        changepoint = find_changepoints(profile['Z'].values)[0]
+        changepoint = find_changepoints(profile['Z'].values, penalty)[0]
         changepoints.append(profile.geometry.iloc[changepoint])
         estimation = estimate_gully(
             profile['Z'].values,
             centerline['Z'].values,
             changepoint
         )
-        if profile_out_dir is not None and DEBUG >= 1:
+        if profile_out_dir is not None and DEBUG >= 2:
             print('Saving profile', id_, 'in', profile_out_dir, end='\r')
             plt.savefig(profile_out_dir / f'{id_}.png')
             plt.close()
@@ -658,7 +658,7 @@ def map_centerlines_and_profiles(
             # outside the boundary.
             continue
         profile = profile.iloc[0]
-        assert isinstance(profile, LineString)
+        assert isinstance(profile, LineString), f'Found {type(profile)}'
         assert isinstance(centerline_, LineString)
         yield GullyBed(centerline_, profile)
 

@@ -10,9 +10,9 @@ import geopandas as gpd
 from gully_erosion_estimation import DEBUG
 
 
-def find_changepoints(values: np.ndarray):
+def find_changepoints(values: np.ndarray, penalty: int):
     algorithm = rpt.Pelt(model='rbf').fit(values)
-    return algorithm.predict(pen=20)
+    return algorithm.predict(pen=penalty)
 
 
 def plot_changepoints(
@@ -97,6 +97,6 @@ def estimate_gully(
     padded = pad(no_head, y2)
     with_head = fill_polyfit(padded, y1_poly, y2)
     estimation = estimate_nan(with_head)
-    if DEBUG >= 1:
+    if DEBUG >= 2:
         debug_estimation(y1, estimation)
     return estimation
