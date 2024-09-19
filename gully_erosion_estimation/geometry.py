@@ -561,7 +561,6 @@ def estimate_gully_beds(
     )
 
     def estimate(id_) -> gpd.GeoDataFrame:
-        import matplotlib.pyplot as plt
         profile: gpd.GeoDataFrame = profile_sample.loc[
             profile_sample[line_id_col] == id_
         ]
@@ -573,12 +572,9 @@ def estimate_gully_beds(
         estimation = estimate_gully(
             profile['Z'].values,
             centerline['Z'].values,
-            changepoints
+            changepoints,
+            profile_out_dir / f'{id_}.png' if profile_out_dir is not None else None
         )
-        if profile_out_dir is not None and DEBUG >= 2:
-            print('Saving profile', id_, 'in', profile_out_dir, end='\r')
-            plt.savefig(profile_out_dir / f'{id_}.png')
-            plt.close()
         estimation_profile = pd.concat(
             [centerline.geometry, profile.geometry],
             ignore_index=True

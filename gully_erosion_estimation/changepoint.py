@@ -20,6 +20,7 @@ def estimate_gully(
     values_before: np.ndarray,
     values_after: np.ndarray,
     changepoints: c.Sequence[int],
+    debug_out_file: Path | None = None
 ):
     # Only the first changepoint is considered.
     # The others are used, for now, for plotting purposes (debug)
@@ -71,16 +72,39 @@ def estimate_gully(
         for changepoint in changepoints:
             ax.axvline(changepoint, color='r', ls='--', linewidth=0.4)
         plt.ylabel('Elevation')
+        plt.savefig(debug_out_file)
+        plt.close()
+        # plt.show()
+
+    def debug_spline_fit(
+        head: np.ndarray,
+        head_splline_fitted: np.ndarray
+    ):
+        import matplotlib.pyplot as plt
+        _, ax = plt.subplots(figsize=(5, 5))
+
+        x = range(head.shape[0])
+        ax.plot(x, estimation, c='orange')
+        ax.plot(head)
+        ax.plot(head_splline_fitted)
+        # for changepoint in changepoints:
+        #     ax.axvline(changepoint, color='r', ls='--', linewidth=0.4)
+        plt.ylabel('Elevation')
+        plt.savefig(debug_out_file.with_name(
+            f'{debug_out_file.stem}_spline_fit.png'
+        ))
+        plt.close()
         # plt.show()
 
     y1 = values_before.copy()
     y1_head = y1[:changepoints[0]]
-    y1_poly = spline_fit(np.arange(y1_head.shape[0]), y1_head)
+    y1_spline = spline_fit(np.arange(y1_head.shape[0]), y1_head)
     y2 = values_after.copy()
     no_head = fill_head_with_nan(y1, changepoints[0])
     padded = pad(no_head, y2)
-    with_head = fill_polyfit(padded, y1_poly, y2)
+    with_head = fill_polyfit(padded, y1_spline, y2)
     estimation = estimate_nan(with_head)
-    if DEBUG >= 2:
+    if DEBUG >= 2 and debug_out_file is not None:
         debug_estimation(y1, estimation)
+        debug_spline_fit(y1_head, y1_spline)
     return estimation

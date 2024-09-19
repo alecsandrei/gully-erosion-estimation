@@ -267,5 +267,5 @@ if __name__ == '__main__':
                 for result in results:
                     print(result)
         else:
-            for model in MODELS:
+            for model in MODELS[::-1]:
                 main(model=model)
