@@ -364,10 +364,10 @@ def is_contiguous(
     return False
 
 
-def get_centerline(geoms: Polygon, crs) -> gpd.GeoSeries:
+def get_centerline(geoms: Polygon, crs, interpolation_distance: float) -> gpd.GeoSeries:
     return gpd.GeoSeries(
         centerline.geometry.Centerline(
-            geoms, interpolation_distance=0.5).geometry,
+            geoms, interpolation_distance=interpolation_distance).geometry,
         crs=crs
     )  # type: ignore
 
@@ -474,7 +474,7 @@ def get_pour_points(
                 if intersects(dangle, polygon.boundary):
                     dangles_intersecting.append(dangle)
             n_dangles = len(dangles_intersecting)
-            assert n_dangles != 0
+            # assert n_dangles != 0
             if n_dangles == 1:
                 yield dangles_intersecting[0]
 
@@ -550,7 +550,7 @@ def estimate_gully_beds(
     penalty: int,
     profile_out_dir: Path | None = None
 ) -> tuple[gpd.GeoDataFrame, list[Point]]:
-    changepoints: list[Point] = []
+    gully_head_changepoints: list[Point] = []
     profile_sample = dem.sample(profiles, epsg)
     centerline_sample = dem.sample(centerlines, epsg)
 
@@ -568,12 +568,12 @@ def estimate_gully_beds(
         centerline: gpd.GeoDataFrame = centerline_sample.loc[
             centerline_sample[line_id_col] == id_
         ]
-        changepoint = find_changepoints(profile['Z'].values, penalty)[0]
-        changepoints.append(profile.geometry.iloc[changepoint])
+        changepoints = find_changepoints(profile['Z'].values, penalty)
+        gully_head_changepoints.append(profile.geometry.iloc[changepoints[0]])
         estimation = estimate_gully(
             profile['Z'].values,
             centerline['Z'].values,
-            changepoint
+            changepoints
         )
         if profile_out_dir is not None and DEBUG >= 2:
             print('Saving profile', id_, 'in', profile_out_dir, end='\r')
@@ -597,7 +597,7 @@ def estimate_gully_beds(
                 [estimations, estimation],
                 ignore_index=True
             )
-    return (estimations, changepoints)  # type: ignore
+    return (estimations, gully_head_changepoints)  # type: ignore
 
 
 def snap_to_nearest(

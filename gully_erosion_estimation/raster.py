@@ -163,7 +163,7 @@ class Raster:
             processing.run('sagang:gaussianfilter', {
                 'INPUT': str(self),
                 'RESULT': 'TEMPORARY_OUTPUT',
-                'KERNEL_RADIUS': 3,
+                'KERNEL_RADIUS': 5,
                 'SIGMA': 50
             })['RESULT'], epsg=self.epsg
         )

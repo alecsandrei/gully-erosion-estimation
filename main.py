@@ -4,6 +4,7 @@ from pathlib import Path
 import typing as t
 import concurrent.futures
 
+from shapely import Polygon
 import matplotlib.pyplot as plt
 import geopandas as gpd
 import pandas as pd
@@ -20,20 +21,6 @@ from gully_erosion_estimation.geometry import (
     extend_line_to_geom
 )
 from gully_erosion_estimation.raster import DEM, multilevel_b_spline, Evaluator, inverse_distance_weighted, align_rasters
-from gully_erosion_estimation.changepoint import find_changepoints, plot_changepoints
-
-
-def debug_profiles(model: Models, profile_samples):
-    profiles = Path('./data/derived/profiles')
-    if not profiles.exists():
-        profiles.mkdir()
-    model_profiles = profiles / model
-    if not model_profiles.exists():
-        model_profiles.mkdir()
-    for id_ in profile_samples['ID_LINE'].unique():
-        out_file = model_profiles / f'{id_}.png'
-        profile = profile_samples.loc[profile_samples['ID_LINE'] == id_, 'Z']
-        plot_changepoints(profile.values, find_changepoints(profile.values), out_file=out_file)
 
 
 def run(gpkg: Path, dem: Path, truth_dem: Path, out_folder: Path):
@@ -51,13 +38,13 @@ def run(gpkg: Path, dem: Path, truth_dem: Path, out_folder: Path):
     _2019_gdf = gpd.read_file(gpkg, layer='2019', engine='pyogrio')
     assert _2012_gdf.shape[0] == 1
     assert _2019_gdf.shape[0] == 1
-    _2012_polygon = _2012_gdf.geometry[0]
     _2019_polygon = _2019_gdf.geometry[0]
-    _2012_2019_diff = _2019_polygon.difference(_2012_polygon)
+    _2012_polygon = _2012_gdf.geometry[0].intersection(_2019_polygon)
+    _2012_2019_diff: Polygon = _2019_polygon.difference(_2012_polygon)
     estimation_surface = gpd.read_file(
         gpkg, layer='estimation_surfaces', engine='pyogrio'
     ).geometry.union_all().intersection(_2019_polygon)
-    dem_processor = DEM(dem, epsg=EPSG)
+    dem_processor = DEM(dem, mask=_2012_polygon, epsg=EPSG)
     dem_truth_processor = DEM(truth_dem, epsg=EPSG)
     if CACHE:
         print('reading cached features...')
@@ -91,18 +78,20 @@ def run(gpkg: Path, dem: Path, truth_dem: Path, out_folder: Path):
         centerlines_snapped = next(results)
         print('finished reading cached features')
     else:
-        _2012_centerline = get_centerline(_2012_gdf.geometry[0], _2012_gdf.crs)
-        _2012_centerline.to_file(out_folder / f'{model}_2012_centerline.shp')
-        _2012_centerline_types = CenterlineTypes.from_linestrings(
-            _2012_centerline
+        # FInd some sort of formula to compute this, like the one below for e.g.
+        # interpolation_distance = _2019_polygon.area / (_2019_polygon.area + _2012_2019_diff.area) / 3
+        interpolation_distance = 1
+        print(interpolation_distance)
+        _2019_centerline = get_centerline(
+            _2019_gdf.geometry[0],
+            _2019_gdf.crs,
+            interpolation_distance=interpolation_distance
         )
-        _2019_centerline = get_centerline(_2019_gdf.geometry[0], _2019_gdf.crs)
         _2019_centerline.to_file(out_folder / f'{model}_2019_centerline.shp')
         _2019_centerline_types = CenterlineTypes.from_linestrings(
             _2019_centerline
         )
 
-        _2012_centerline_types.clean_orphaned()
         _2019_centerline_types.clean_orphaned()
 
         _2019_merged = merge_linestrings(*_2019_centerline_types)
@@ -129,6 +118,9 @@ def run(gpkg: Path, dem: Path, truth_dem: Path, out_folder: Path):
             dem_processor.size_x
         )
         gully_beds = list(gully_bed)
+        # gpd.GeoSeries([bed.merged for bed in gully_beds], crs=EPSG).to_file(
+        #     out_folder / 'channels.shp'
+        # )
         centerlines_snapped = [
             extend_line_to_geom(gully_bed.centerline, _2019_polygon.boundary)
             for gully_bed in gully_beds
@@ -150,6 +142,7 @@ def run(gpkg: Path, dem: Path, truth_dem: Path, out_folder: Path):
         profile_out_dir = out_folder / 'estimation'
         profile_out_dir.mkdir(exist_ok=True)
 
+    dem_processor = DEM(dem, epsg=EPSG)
     estimations, _ = estimate_gully_beds(
         profiles,
         centerlines_snapped,
@@ -188,7 +181,7 @@ def run(gpkg: Path, dem: Path, truth_dem: Path, out_folder: Path):
         evaluator = Evaluator(
             *masked_dems,
             estimation_surface=estimation_surface
-        )
+        )  # type: ignore
         evaluator.evaluate()
         print('Estimated for', model)
     # breakpoint()
@@ -222,8 +215,21 @@ def run(gpkg: Path, dem: Path, truth_dem: Path, out_folder: Path):
             interpolation_folder.with_name('cover')
         )
 
-        print(estimations)
-        print(interpolation)
+        masked_dems_dir = out_folder / 'masked_dems'
+        if masked_dems_dir.exists():
+            shutil.rmtree(masked_dems_dir)
+            # for file in masked_dems_dir.rglob('*'):
+            #     file.unlink()
+            # masked_dems_dir.rmdir()
+        shutil.move(evaluator.dem.path.parent, masked_dems_dir / 'dem')
+        # Path(path).rename(masked_dems_dir.with_name('dem'))
+        shutil.move(evaluator.gully_cover.path.parent, masked_dems_dir / 'gully_cover')
+        # Path(path).rename(masked_dems_dir.with_name('gully_cover'))
+        shutil.move(evaluator.estimation_dem.path.parent, masked_dems_dir / 'estimation_dem')
+        # Path(path).rename(masked_dems_dir.with_name('estimation_dem'))
+        shutil.move(evaluator.truth_dem.path.parent, masked_dems_dir / 'truth_dem')
+        # Path(path).rename(masked_dems_dir.with_name('truth_dem'))
+
 
 
 Models = t.Literal[

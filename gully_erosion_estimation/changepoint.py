@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Sequence
+import collections.abc as c
 
 import numpy as np
 import ruptures as rpt
 import geopandas as gpd
+from scipy.interpolate import UnivariateSpline
 
 from gully_erosion_estimation import DEBUG
 
@@ -15,34 +16,16 @@ def find_changepoints(values: np.ndarray, penalty: int):
     return algorithm.predict(pen=penalty)
 
 
-def plot_changepoints(
-    values: np.ndarray,
-    changepoints: Sequence[int],
-    out_file: Path
-):
-    import matplotlib.pyplot as plt
-
-    _, ax = plt.subplots(figsize=(12, 5))
-
-    ax.plot(values)
-    plt.xticks(np.arange(0, values.shape[0], 5))
-    for change_point in changepoints:
-        ax.axvline(change_point, color='b', ls='--', linewidth=0.4)
-    plt.xticks(rotation=90)
-    plt.savefig(out_file)
-    plt.close()
-
-
 def estimate_gully(
     values_before: np.ndarray,
     values_after: np.ndarray,
-    changepoint: int,
+    changepoints: c.Sequence[int],
 ):
+    # Only the first changepoint is considered.
+    # The others are used, for now, for plotting purposes (debug)
 
-    def poly_fit(x, y, d):
-        if x.shape[0] <= d:
-            return y
-        return np.polynomial.polynomial.Polynomial.fit(x, y, d)(x)
+    def spline_fit(x, y):
+        return UnivariateSpline(x, y)(x)
 
     def fill_head_with_nan(y: np.ndarray, changepoint: int):
         y = y.copy()
@@ -85,15 +68,16 @@ def estimate_gully(
         x = range(before.shape[0] - estimation.shape[0], before.shape[0])
         ax.plot(x, estimation, c='orange')
         ax.plot(before)
-        plt.axvline(changepoint, c='red')
-        plt.ylabel('Altitudine')
+        for changepoint in changepoints:
+            ax.axvline(changepoint, color='r', ls='--', linewidth=0.4)
+        plt.ylabel('Elevation')
         # plt.show()
 
     y1 = values_before.copy()
-    y1_head = y1[:changepoint]
-    y1_poly = poly_fit(np.arange(y1_head.shape[0]), y1_head, 5)
+    y1_head = y1[:changepoints[0]]
+    y1_poly = spline_fit(np.arange(y1_head.shape[0]), y1_head)
     y2 = values_after.copy()
-    no_head = fill_head_with_nan(y1, changepoint)
+    no_head = fill_head_with_nan(y1, changepoints[0])
     padded = pad(no_head, y2)
     with_head = fill_polyfit(padded, y1_poly, y2)
     estimation = estimate_nan(with_head)
