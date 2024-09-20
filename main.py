@@ -196,7 +196,7 @@ def run(gpkg: Path, dem: Path, truth_dem: Path, out_folder: Path):
                 file.unlink()
             (out_folder / 'interpolation').rmdir()
         interpolation_folder = Path(shutil.move(
-            interpolation.path.parent,
+            interpolation_filtered.path.parent,
             out_folder.resolve()
         ))
         interpolation_folder.rename(

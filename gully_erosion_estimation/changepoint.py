@@ -6,14 +6,14 @@ import collections.abc as c
 import numpy as np
 import ruptures as rpt
 import geopandas as gpd
-from scipy.interpolate import UnivariateSpline
 
 from gully_erosion_estimation import DEBUG
 
 
 def find_changepoints(values: np.ndarray, penalty: int):
     algorithm = rpt.Pelt(model='rbf').fit(values)
-    return algorithm.predict(pen=penalty)
+    # the last value should not be returned.
+    return algorithm.predict(pen=penalty)[:-1]
 
 
 def estimate_gully(
@@ -25,8 +25,10 @@ def estimate_gully(
     # Only the first changepoint is considered.
     # The others are used, for now, for plotting purposes (debug)
 
-    def spline_fit(x, y):
-        return UnivariateSpline(x, y)(x)
+    def poly_fit(x, y, d=5):
+        if x.shape[0] <= 5:
+            return y
+        return np.polynomial.polynomial.Polynomial.fit(x, y, d)(x)
 
     def fill_head_with_nan(y: np.ndarray, changepoint: int):
         y = y.copy()
@@ -52,7 +54,11 @@ def estimate_gully(
         nan_indices = np.argwhere(np.isnan(y))
         nan_len = nan_indices.shape[0]
         max_, min_ = y[nan_indices[0] - 1], y[nan_indices[-1] + 1]
-        estimated = normalize(exponential(np.linspace(max_, min_, nan_len)), min_, max_)
+        # estimated = normalize(exponential(np.linspace(max_, min_, nan_len)), min_, max_)
+        # dont include max min
+        linear_sequence = np.linspace(max_, min_, nan_len + 2)[1:-1]
+        min_, max_ = linear_sequence[0], linear_sequence[-1]
+        estimated = normalize(exponential(linear_sequence), max_, min_)
         y[nan_indices] = estimated
         return y
 
@@ -67,16 +73,37 @@ def estimate_gully(
         _, ax = plt.subplots(figsize=(15, 5))
 
         x = range(before.shape[0] - estimation.shape[0], before.shape[0])
-        ax.plot(x, estimation, c='orange')
-        ax.plot(before)
-        for changepoint in changepoints:
-            ax.axvline(changepoint, color='r', ls='--', linewidth=0.4)
-        plt.ylabel('Elevation')
-        plt.savefig(debug_out_file)
+        ax.plot(
+            x,
+            estimation,
+            c='#00ff00',
+            label='2019 estimated channel',
+            linewidth=2,
+        )
+        ax.plot(
+            before,
+            c='#5795dc',
+            label='2012 flow path profile',
+            linewidth=2
+        )
+        for i, changepoint in enumerate(changepoints):
+            ax.axvline(
+                changepoint,
+                color='r',
+                ls='--',
+                linewidth=2,
+                label='changepoint' if i == 0 else None
+            )
+        ax.legend(prop={'size': 15})
+        plt.xticks(fontsize=10)
+        plt.yticks(fontsize=10)
+        plt.ylabel('Elevation (m)', size=15)
+        plt.tight_layout()
+        plt.savefig(debug_out_file, dpi=300)
         plt.close()
         # plt.show()
 
-    def debug_spline_fit(
+    def debug_poly_fit(
         head: np.ndarray,
         head_splline_fitted: np.ndarray
     ):
@@ -84,27 +111,30 @@ def estimate_gully(
         _, ax = plt.subplots(figsize=(5, 5))
 
         x = range(head.shape[0])
-        ax.plot(x, estimation, c='orange')
-        ax.plot(head)
-        ax.plot(head_splline_fitted)
-        # for changepoint in changepoints:
-        #     ax.axvline(changepoint, color='r', ls='--', linewidth=0.4)
-        plt.ylabel('Elevation')
+        ax.plot(x, head, c='#5795dc')
+        ax.plot(head_splline_fitted, c='#00ff00')
+        plt.xticks(fontsize=10)
+        plt.yticks(fontsize=10)
+        plt.ylabel('Elevation (m)', size=15)
+        plt.tight_layout()
         plt.savefig(debug_out_file.with_name(
-            f'{debug_out_file.stem}_spline_fit.png'
-        ))
+            f'{debug_out_file.stem}_poly_fit.png'
+        ), dpi=300)
         plt.close()
         # plt.show()
 
     y1 = values_before.copy()
     y1_head = y1[:changepoints[0]]
-    y1_spline = spline_fit(np.arange(y1_head.shape[0]), y1_head)
+    y1_poly = poly_fit(np.arange(y1_head.shape[0]), y1_head)
+    if DEBUG >= 2 and debug_out_file is not None:
+        debug_poly_fit(y1_head, y1_poly)
     y2 = values_after.copy()
     no_head = fill_head_with_nan(y1, changepoints[0])
     padded = pad(no_head, y2)
-    with_head = fill_polyfit(padded, y1_spline, y2)
+    with_head = fill_polyfit(padded, y1_poly, y2)
     estimation = estimate_nan(with_head)
+    # estimation[:changepoints[0]] = poly_fit(np.arange(estimation[:changepoints[0]].shape[0]), estimation[:changepoints[0]])
+    # estimation = poly_fit(np.arange(estimation.shape[0]), estimation)
     if DEBUG >= 2 and debug_out_file is not None:
         debug_estimation(y1, estimation)
-        debug_spline_fit(y1_head, y1_spline)
     return estimation

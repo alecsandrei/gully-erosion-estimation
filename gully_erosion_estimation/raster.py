@@ -434,7 +434,7 @@ class Evaluator:
         print(
             f'Estimation: {estimation_volume:.3f}\n'
             f'Truth: {truth_volume:.3f}\n'
-            f'Error: {error:%}'
+            f'Error: {error:.3%}'
         )
 
 
