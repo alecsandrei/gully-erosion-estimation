@@ -1,6 +1,5 @@
 centerline
 geopandas
 ruptures
-scipy
 
 # As of right now, also depends on PyQGIS
